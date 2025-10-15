@@ -1,0 +1,7 @@
+###############
+# Config for the parameters for training, model, data, etc.
+###############
+
+base_config: &BASE_CONFIG
+    ## SSL parameters
+  random_seed: 42
