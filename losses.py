@@ -10,37 +10,44 @@ def compute_residual_loss(outputs, inputs):
 
     Args:
         outputs: Model predictions f(x)=Psi(x) (requires_grad=True), shape [batch_size, 1]
-        inputs: Input coordinates x, shape [batch_size, 1]
+        inputs: Input coordinates x (requires_grad=True), shape [batch_size, 1]
 
     Returns:
         residual_loss: Mean squared residual
     """
-    x = inputs.clone().detach().requires_grad_(True)
-    f = outputs.squeeze()  # f(x) = Psi(x), shape: [batch_size]
+    # inputs already has requires_grad=True from trainer, don't clone it
+    x = inputs.squeeze() if len(inputs.shape) > 1 else inputs
+    f = outputs.squeeze() if len(outputs.shape) > 1 else outputs
 
     # Compute x*f(x)
-    g = x.squeeze() * f
+    g = x * f
 
     # Compute first derivative: dg/dx
     dg_dx = torch.autograd.grad(
-        g,
-        x,
+        outputs=g,
+        inputs=x,
         grad_outputs=torch.ones_like(g),
         create_graph=True,
-        retain_graph=True
-    )[0].squeeze()
+        retain_graph=True,
+        only_inputs=True,
+        allow_unused=False
+    )[0]
 
     # Compute second derivative: d^2g/dx^2
     d2g_dx2 = torch.autograd.grad(
-        dg_dx,
-        x,
+        outputs=dg_dx,
+        inputs=x,
         grad_outputs=torch.ones_like(dg_dx),
         create_graph=True,
-        retain_graph=True
-    )[0].squeeze()
+        retain_graph=True,
+        only_inputs=True,
+        allow_unused=True
+    )
+    d2g_dx2 = d2g_dx2[0] if len(
+        d2g_dx2) > 0 and d2g_dx2[0] is not None else torch.zeros_like(dg_dx)
 
     # PDE residual: 1/x^2 * d^2(x*f)/dx^2 - 3/(4*pi) = 0
-    x_sq = x.squeeze() ** 2
+    x_sq = x ** 2
     # Avoid division by zero for x=0
     x_sq = torch.clamp(x_sq, min=1e-8)
 
@@ -92,8 +99,14 @@ def compute_bc_loss_1(outputs, inputs):
         x_boundary,
         grad_outputs=torch.ones_like(f_boundary),
         create_graph=True,
-        retain_graph=True
-    )[0].squeeze()
+        retain_graph=True,
+        allow_unused=True
+    )
+
+    if len(df_dx_at_boundary) > 0 and df_dx_at_boundary[0] is not None:
+        df_dx_at_boundary = df_dx_at_boundary[0].squeeze()
+    else:
+        df_dx_at_boundary = torch.zeros_like(f_boundary)
 
     # BC constraint: f'(1) - f(1) = 0
     bc_constraint = df_dx_at_boundary - f_boundary
@@ -219,6 +232,9 @@ def compute_total_loss(loss_dict, weighter):
     """
     Compute total weighted loss from individual loss components.
 
+    Note: Weights are updated per epoch (not per batch) for adaptive strategy
+    to ensure stable training.
+
     Args:
         loss_dict: Dictionary of individual losses ({'residual': tensor, 'bc_1': tensor, 'bc_2': tensor})
         weighter: LossWeighter instance
@@ -226,11 +242,7 @@ def compute_total_loss(loss_dict, weighter):
     Returns:
         total_loss: Weighted sum of losses
     """
-    # Update weights if using adaptive strategy
-    if weighter.strategy == 'adaptive':
-        weighter.update_weights(loss_dict)
-
-    # Compute weighted total
+    # Compute weighted total (weights are set externally per epoch for adaptive)
     total_loss = weighter.get_weighted_loss(loss_dict)
 
     return total_loss

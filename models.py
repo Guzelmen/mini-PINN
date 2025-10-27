@@ -116,8 +116,14 @@ class Model2(nn.Module):
             N, x,
             grad_outputs=torch.ones_like(N),
             create_graph=True,  # needed if you want higher derivatives later
-            retain_graph=True  # only needed if you reuse graph, safe to include for now
-        )[0]  # returns a tuple; take first element
+            retain_graph=True,  # only needed if you reuse graph, safe to include for now
+            allow_unused=True
+        )
+
+        if len(N_prime) > 0 and N_prime[0] is not None:
+            N_prime = N_prime[0]
+        else:
+            N_prime = torch.zeros_like(N)
 
         Psi = x**2 + 1 + x*N + x*(1-x)*N_prime
 
