@@ -28,7 +28,7 @@ def siren_init(layer, w0=30.0, is_first=False):
 
 class Model1(nn.Module):
     """
-    Inputs: x in [0,1], r0, Z. Output: V(x; r0, Z).
+    Inputs: x in [0,1]. Output: Psi(x).
     Uses direct input with Siren MLP.
     """
 
@@ -39,8 +39,8 @@ class Model1(nn.Module):
         layers = params.nlayers
         w0 = params.w0
 
-        # Direct input: x, r0, Z (3 dimensions)
-        in_dim = 3
+        # Direct input: x
+        in_dim = 1
         self.first = nn.Linear(in_dim, hidden)
         self.hiddens = nn.ModuleList(
             [nn.Linear(hidden, hidden) for _ in range(layers-2)])
@@ -53,27 +53,29 @@ class Model1(nn.Module):
         nn.init.zeros_(self.out.weight)
         nn.init.zeros_(self.out.bias)
 
-    def forward(self, xrz):
+    def forward(self, x):
         """
         Args:
-            xrz: shape [N,3] -> columns: x, r0, Z
+            x: shape N
 
         Returns:
-            V: shape [N,1]
+            Psi: shape N
         """
-        h = self.act(self.first(xrz))
+        h = self.act(self.first(x))
         for layer in self.hiddens:
             h = self.act(layer(h))
-        V = self.out(h)
-        return V
+        Psi = self.out(h)
+        return Psi
 
 
 class Model2(nn.Module):
     """
-    Inputs: x in [0,1], r0, Z. Output: V(x; r0, Z).
+    Inputs: x in [0,1]. Output: Psi(x).
     Uses direct input with Siren MLP.
-    Hard constraint: projection at the end to enforce V'(1) = 0. 
-    The x·g factor keeps V finite and well-behaved at the origin in a spherical cell.
+    Hard constraint: transform to ensure 2 constraints:
+     - Psi(0) = 1
+     - Psi(1) = Psi'(1)
+    Tranform: Psi(x) = x^2 + 1 + xN(x) + x(1 - x)N'(x)
     """
 
     def __init__(self, params):
@@ -83,8 +85,8 @@ class Model2(nn.Module):
         layers = params.nlayers
         w0 = params.w0
 
-        # Direct input: x, r0, Z (3 dimensions)
-        in_dim = 3
+        # Direct input: x
+        in_dim = 1
         self.first = nn.Linear(in_dim, hidden)
         self.hiddens = nn.ModuleList(
             [nn.Linear(hidden, hidden) for _ in range(layers-2)])
@@ -97,21 +99,26 @@ class Model2(nn.Module):
         nn.init.zeros_(self.out.weight)
         nn.init.zeros_(self.out.bias)
 
-        # scaling factor for the boundary condition that can be learned
-        self.bc_scale = nn.Parameter(torch.tensor(1.0))
-
-    def forward(self, xrz):
+    def forward(self, x):
         """
         Args:
-            xrz: shape [N,3] -> columns: x, r0, Z
+            x: shape N
 
         Returns:
-            V: shape [N,1]
+            Psi: shape N
         """
-        x = xrz[..., 0:1]
-        h = self.act(self.first(xrz))
+        x = x.clone().detach().requires_grad_(True)
+        h = self.act(self.first(x))
         for layer in self.hiddens:
             h = self.act(layer(h))
-        g = self.out(h)
-        V = x * g + self.bc_scale * (1.0 - x)**2
-        return V
+        N = self.out(h)
+        N_prime = torch.autograd.grad(
+            N, x,
+            grad_outputs=torch.ones_like(N),
+            create_graph=True,  # needed if you want higher derivatives later
+            retain_graph=True  # only needed if you reuse graph, safe to include for now
+        )[0]  # returns a tuple; take first element
+
+        Psi = x**2 + 1 + x*N + x*(1-x)*N_prime
+
+        return Psi

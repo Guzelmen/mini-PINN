@@ -87,7 +87,7 @@ def load_data(params):
     }
 
 
-def get_data_loaders(data_dict, batch_size=32, shuffle_train=True):
+def get_data_loaders(data_dict, batch_size, shuffle_train=True):
     """
     Convert the data dictionary into PyTorch DataLoaders.
 
