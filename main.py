@@ -4,7 +4,7 @@ Will run training and inference from here.
 import random
 from models import *
 from trainer import trainer
-from data_utils.loader import *
+from data_utils.loader import load_data, get_data_loaders
 import torch
 import numpy as np
 import argparse
@@ -36,6 +36,7 @@ if __name__ == "__main__":
         "start_lr": params.start_lr,
         "end_lr": params.end_lr,
         "lr_warmup_epochs": params.lr_warmup_epochs,
+        "min_lr": params.min_lr,
         "loss_strategy": params.loss_strategy,
         "relative_weights": params.relative_weights,
         "batch_size": params.batch_size,
@@ -52,7 +53,7 @@ if __name__ == "__main__":
     data = load_data(params)
 
     # Create data loaders
-    from data_utils.loader import get_data_loaders
+
     data_loaders = get_data_loaders(data, batch_size=params.batch_size)
 
     train_loader = data_loaders["train"]

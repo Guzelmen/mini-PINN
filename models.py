@@ -107,23 +107,27 @@ class Model2(nn.Module):
         Returns:
             Psi: shape N
         """
-        x = x.clone().detach().requires_grad_(True)
+        # Don't detach! x already has requires_grad=True from trainer
+        # We need the graph connection for higher-order derivatives
         h = self.act(self.first(x))
         for layer in self.hiddens:
             h = self.act(layer(h))
         N = self.out(h)
-        N_prime = torch.autograd.grad(
+        N_prime_outputs = torch.autograd.grad(
             N, x,
             grad_outputs=torch.ones_like(N),
             create_graph=True,  # needed if you want higher derivatives later
             retain_graph=True,  # only needed if you reuse graph, safe to include for now
-            allow_unused=True
+            only_inputs=True,   # Only compute gradients w.r.t. x
+            allow_unused=False  # Should not be unused - raise error if disconnected
         )
 
-        if len(N_prime) > 0 and N_prime[0] is not None:
-            N_prime = N_prime[0]
-        else:
-            N_prime = torch.zeros_like(N)
+        if len(N_prime_outputs) == 0 or N_prime_outputs[0] is None:
+            raise RuntimeError(
+                "N_prime computation failed in Model2. "
+                "Check that x is properly connected in the computational graph."
+            )
+        N_prime = N_prime_outputs[0]
 
         Psi = x**2 + 1 + x*N + x*(1-x)*N_prime
 

@@ -15,43 +15,79 @@ def compute_residual_loss(outputs, inputs):
     Returns:
         residual_loss: Mean squared residual
     """
-    # inputs already has requires_grad=True from trainer, don't clone it
-    x = inputs.squeeze() if len(inputs.shape) > 1 else inputs
-    f = outputs.squeeze() if len(outputs.shape) > 1 else outputs
+    # inputs already has requires_grad=True from trainer, preserve the graph
+    # CRITICAL: Keep the original tensor reference - don't create new views
+    # The model outputs might be 1D or 2D, but inputs is [batch_size, 1]
+    x = inputs  # Keep original reference with shape [batch_size, 1]
 
-    # Compute x*f(x)
+    # Outputs from model - handle shape consistently
+    if len(outputs.shape) == 2 and outputs.shape[1] == 1:
+        f = outputs  # Keep as [batch_size, 1] to match x
+    elif len(outputs.shape) == 1:
+        f = outputs.unsqueeze(1)  # Convert to [batch_size, 1]
+    else:
+        f = outputs
+
+    # Compute x*f(x) - element-wise multiplication (broadcasting handles shapes)
+    # x: [batch_size, 1], f: [batch_size, 1] or [batch_size] -> g: [batch_size, 1] or [batch_size]
     g = x * f
 
     # Compute first derivative: dg/dx
-    dg_dx = torch.autograd.grad(
+    # CRITICAL: Use the exact same tensor (x/inputs) throughout
+    dg_dx_outputs = torch.autograd.grad(
         outputs=g,
-        inputs=x,
+        inputs=x,  # Use x (which is inputs reference)
         grad_outputs=torch.ones_like(g),
-        create_graph=True,
-        retain_graph=True,
+        create_graph=True,  # Critical: needed for second derivative
+        retain_graph=True,  # Keep graph for multiple backward passes
+        # Only compute gradients w.r.t. x (not model params)
         only_inputs=True,
-        allow_unused=False
-    )[0]
+        allow_unused=False  # Should not be unused - raise error if disconnected
+    )
+
+    if len(dg_dx_outputs) == 0 or dg_dx_outputs[0] is None:
+        raise RuntimeError(
+            "First derivative (dg_dx) computation failed. "
+            "Check that x is properly connected in the computational graph. "
+            "Model2 should not use clone().detach() in forward()."
+        )
+    dg_dx = dg_dx_outputs[0]
 
     # Compute second derivative: d^2g/dx^2
-    d2g_dx2 = torch.autograd.grad(
+    # dg_dx depends on x through the graph created by create_graph=True above
+    # CRITICAL: Use the same x tensor for second derivative
+    d2g_dx2_outputs = torch.autograd.grad(
         outputs=dg_dx,
-        inputs=x,
+        inputs=x,  # Use the SAME x tensor
         grad_outputs=torch.ones_like(dg_dx),
-        create_graph=True,
+        create_graph=True,  # Needed if we want third derivatives later
         retain_graph=True,
-        only_inputs=True,
-        allow_unused=True
+        only_inputs=True,  # Only compute gradients w.r.t. x
+        allow_unused=False  # Should never be unused if graph is connected
     )
-    d2g_dx2 = d2g_dx2[0] if len(
-        d2g_dx2) > 0 and d2g_dx2[0] is not None else torch.zeros_like(dg_dx)
+
+    # Extract gradient w.r.t. x
+    if len(d2g_dx2_outputs) == 0 or d2g_dx2_outputs[0] is None:
+        raise RuntimeError(
+            "Second derivative (d²g/dx²) computation failed. "
+            "This indicates the computational graph is disconnected. "
+            "Check: 1) x not detached in model forward(), "
+            "2) model output properly connected to x, 3) first derivative computation succeeded."
+        )
+    d2g_dx2 = d2g_dx2_outputs[0]
 
     # PDE residual: 1/x^2 * d^2(x*f)/dx^2 - 3/(4*pi) = 0
     x_sq = x ** 2
-    # Avoid division by zero for x=0
-    x_sq = torch.clamp(x_sq, min=1e-8)
+    # Avoid division by zero for x=0, but use a less aggressive clamp
+    # Using a larger minimum (1e-6) reduces numerical instability near x=0
+    x_sq = torch.clamp(x_sq, min=1e-6)
 
     residual = d2g_dx2 / x_sq - 3 / (4 * torch.pi)
+
+    # Clip residual to prevent extreme values from dominating the loss
+    # This helps with numerical stability, especially during early training
+    residual = torch.clamp(residual, min=-1e6, max=1e6)
+
     residual_loss = torch.mean(residual ** 2)
 
     return residual_loss
@@ -75,11 +111,25 @@ def compute_bc_loss_1(outputs, inputs):
     Returns:
         bc_loss: Mean squared error at boundary x=1
     """
-    x = inputs.clone().detach().requires_grad_(True)
-    f = outputs.squeeze()  # f(x), shape: [batch_size]
+    # CRITICAL: Keep the original tensor reference - don't create new views
+    # The model outputs might be 1D or 2D, but inputs is [batch_size, 1]
+    x = inputs  # Keep original reference with shape [batch_size, 1]
+
+    # Outputs from model - handle shape consistently
+    if len(outputs.shape) == 2 and outputs.shape[1] == 1:
+        f = outputs  # Keep as [batch_size, 1] to match x
+    elif len(outputs.shape) == 1:
+        f = outputs.unsqueeze(1)  # Convert to [batch_size, 1]
+    else:
+        f = outputs
 
     # Find points near x=1 (boundary condition location)
-    x_val = x.squeeze()
+    # Extract values for comparison while preserving graph
+    # For shape [batch_size, 1], we need to compare x[:, 0] or x.squeeze() values
+    if len(x.shape) == 2 and x.shape[1] == 1:
+        x_val = x[:, 0]  # Extract for comparison
+    else:
+        x_val = x
 
     # Find points where x is close to 1 (within tolerance)
     tol = 1e-3
@@ -89,26 +139,40 @@ def compute_bc_loss_1(outputs, inputs):
         # No boundary points found, return zero loss
         return torch.tensor(0.0, device=outputs.device, requires_grad=True)
 
-    # Get boundary points
-    x_boundary = x[boundary_mask].clone().detach().requires_grad_(True)
-    f_boundary = f[boundary_mask]
-
-    # Compute derivative df/dx at boundary
-    df_dx_at_boundary = torch.autograd.grad(
-        f_boundary,
-        x_boundary,
-        grad_outputs=torch.ones_like(f_boundary),
-        create_graph=True,
+    # Compute derivative df/dx for ALL points
+    # CRITICAL: f depends on the full x tensor (passed to model), not on a subset
+    # We must compute grad(f, x) using the full tensors, then extract boundary values
+    df_dx_outputs = torch.autograd.grad(
+        outputs=f,  # Use full f tensor
+        inputs=x,    # Use full x tensor (what f depends on)
+        grad_outputs=torch.ones_like(f),
+        create_graph=True,  # Needed if higher derivatives are required
         retain_graph=True,
-        allow_unused=True
+        only_inputs=True,   # Only compute gradients w.r.t. x
+        allow_unused=False  # Should not be unused if graph is connected
     )
 
-    if len(df_dx_at_boundary) > 0 and df_dx_at_boundary[0] is not None:
-        df_dx_at_boundary = df_dx_at_boundary[0].squeeze()
-    else:
-        df_dx_at_boundary = torch.zeros_like(f_boundary)
+    if len(df_dx_outputs) == 0 or df_dx_outputs[0] is None:
+        raise RuntimeError(
+            "BC1 derivative computation failed. "
+            "Check that x is properly connected in the computational graph. "
+            "Model should not detach x in forward()."
+        )
+    df_dx = df_dx_outputs[0]  # Shape: [batch_size, 1] or [batch_size]
+
+    # Extract boundary values AFTER computing the gradient
+    f_boundary = f[boundary_mask]  # Shape: [n_boundary, 1] or [n_boundary]
+    # Extract boundary gradient values
+    df_dx_at_boundary = df_dx[boundary_mask]
 
     # BC constraint: f'(1) - f(1) = 0
+    # Ensure shapes match (might need to squeeze/unsqueeze)
+    if len(df_dx_at_boundary.shape) != len(f_boundary.shape):
+        if len(df_dx_at_boundary.shape) == 2 and df_dx_at_boundary.shape[1] == 1:
+            df_dx_at_boundary = df_dx_at_boundary.squeeze(1)
+        elif len(f_boundary.shape) == 2 and f_boundary.shape[1] == 1:
+            f_boundary = f_boundary.squeeze(1)
+
     bc_constraint = df_dx_at_boundary - f_boundary
     bc_loss = torch.mean(bc_constraint ** 2)
 
@@ -128,11 +192,24 @@ def compute_bc_loss_2(outputs, inputs):
     Returns:
         bc_loss: Mean squared error at boundary x=0
     """
-    x = inputs.clone().detach().requires_grad_(True)
-    f = outputs.squeeze()  # f(x), shape: [batch_size]
+    # CRITICAL: Keep the original tensor reference - don't create new views
+    # The model outputs might be 1D or 2D, but inputs is [batch_size, 1]
+    x = inputs  # Keep original reference with shape [batch_size, 1]
+
+    # Outputs from model - handle shape consistently
+    if len(outputs.shape) == 2 and outputs.shape[1] == 1:
+        f = outputs  # Keep as [batch_size, 1] to match x
+    elif len(outputs.shape) == 1:
+        f = outputs.unsqueeze(1)  # Convert to [batch_size, 1]
+    else:
+        f = outputs
 
     # Find points near x=0 (boundary condition location)
-    x_val = x.squeeze()
+    # Extract values for comparison while preserving graph
+    if len(x.shape) == 2 and x.shape[1] == 1:
+        x_val = x[:, 0]  # Extract for comparison
+    else:
+        x_val = x
 
     # Find points where x is close to 0 (within tolerance)
     tol = 1e-3
@@ -142,10 +219,14 @@ def compute_bc_loss_2(outputs, inputs):
         # No boundary points found, return zero loss
         return torch.tensor(0.0, device=outputs.device, requires_grad=True)
 
-    # Get boundary points
-    f_boundary = f[boundary_mask]
+    # Get boundary points - use indexing to preserve graph connection
+    f_boundary = f[boundary_mask]  # Shape: [n_boundary, 1] or [n_boundary]
 
     # BC constraint: f(0) = 1
+    # Handle shape compatibility
+    if len(f_boundary.shape) == 2 and f_boundary.shape[1] == 1:
+        f_boundary = f_boundary.squeeze(1)
+
     bc_constraint = f_boundary - 1
     bc_loss = torch.mean(bc_constraint ** 2)
 

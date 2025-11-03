@@ -59,15 +59,41 @@ def cartesian(x, r0, Z):
     return torch.cat([xT, r0T, ZT], dim=1)
 
 
-def main(out_path="./data/40kpoints_logr0.pt", seed=42, n_x=200):
+def main(out_path="./data/40kgridpoints_logr0_randZ_noendpoints.pt", seed=42, n_points=40000):
+    """
+    Generate dataset with n_points (default 40k) points.
+    - x: evenly spaced grid in [0, 1] (inclusive) with n_points values
+    - r0: randomly sampled from logspace(1e-4, 1e-2, 20) for each x
+    - Z: randomly sampled from [1, 2, 4, 8, 16, 24, 32, 48, 64, 80] for each x
+    """
     set_seed(seed)
-    x = make_x_edge_focused(n_points=n_x, seed=seed)
-    r0 = make_r0_mm_20()
-    Z = make_Z_10()
-    X = cartesian(x, r0, Z)  # [n_x*20*10, 3]
+
+    # Create evenly spaced x grid from 0 to 1 (inclusive)
+    x = torch.linspace(0.0001, 0.9999, n_points).view(-1, 1)  # [n_points, 1]
+
+    # Define r0 and Z ranges (same as before)
+    r0_values = make_r0_mm_20()  # [20, 1] - logspace from 1e-4 to 1e-2
+    Z_values = make_Z_10()  # [10, 1] - [1, 2, 4, 8, 16, 24, 32, 48, 64, 80]
+
+    # Randomly sample r0 and Z for each x point
+    g = torch.Generator().manual_seed(seed)
+    r0_indices = torch.randint(0, r0_values.shape[0], (n_points,), generator=g)
+    Z_indices = torch.randint(0, Z_values.shape[0], (n_points,), generator=g)
+
+    r0 = r0_values[r0_indices, :]  # [n_points, 1] - select rows
+    Z = Z_values[Z_indices, :]     # [n_points, 1] - select rows
+
+    # Combine into [x, r0, Z] format
+    X = torch.cat([x, r0, Z], dim=1)  # [n_points, 3]
+
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
-    torch.save({"X": X, "x": x, "r0": r0, "Z": Z, "seed": seed}, out_path)
-    print(f"Saved dataset with {X.shape[0]} rows (n_x={n_x}) to {out_path}")
+    torch.save({"X": X, "x": x, "r0": r0_values,
+               "Z": Z_values, "seed": seed}, out_path)
+    print(f"Saved dataset with {X.shape[0]} points to {out_path}")
+    print(f"  x: evenly spaced grid in (0, 1) with {n_points} points")
+    print(
+        f"  r0: randomly sampled from {r0_values.shape[0]} values in [1e-4, 1e-2]")
+    print(f"  Z: randomly sampled from {Z_values.shape[0]} values")
 
 
 if __name__ == "__main__":
