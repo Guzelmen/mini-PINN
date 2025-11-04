@@ -30,7 +30,7 @@ def compute_residual_loss(outputs, inputs):
 
     # Compute x*f(x) - element-wise multiplication (broadcasting handles shapes)
     # x: [batch_size, 1], f: [batch_size, 1] or [batch_size] -> g: [batch_size, 1] or [batch_size]
-    g = x * f
+    g = f
 
     # Compute first derivative: dg/dx
     # CRITICAL: Use the exact same tensor (x/inputs) throughout
@@ -76,17 +76,13 @@ def compute_residual_loss(outputs, inputs):
         )
     d2g_dx2 = d2g_dx2_outputs[0]
 
-    # PDE residual: 1/x^2 * d^2(x*f)/dx^2 - 3/(4*pi) = 0
-    x_sq = x ** 2
-    # Avoid division by zero for x=0, but use a less aggressive clamp
-    # Using a larger minimum (1e-6) reduces numerical instability near x=0
-    x_sq = torch.clamp(x_sq, min=1e-6)
+    # PDE residual: d^2(f)/dx^2 - 3*x = 0
 
-    residual = d2g_dx2 / x_sq - 3 / (4 * torch.pi)
+    residual = d2g_dx2 - 3*x
 
     # Clip residual to prevent extreme values from dominating the loss
     # This helps with numerical stability, especially during early training
-    residual = torch.clamp(residual, min=-1e6, max=1e6)
+    # residual = torch.clamp(residual, min=-1e6, max=1e6)
 
     residual_loss = torch.mean(residual ** 2)
 

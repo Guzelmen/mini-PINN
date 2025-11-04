@@ -2,7 +2,7 @@
 Will run training and inference from here.
 """
 import random
-from models import *
+from models import Model1, Model2
 from trainer import trainer
 from data_utils.loader import load_data, get_data_loaders
 import torch
@@ -20,29 +20,29 @@ if __name__ == "__main__":
 
     params = YParams("config.yaml", "base_config", print_params=True)
 
+    params.run_name = args.name
+
     wandb.init(
         name=str(args.name),
         project="mini_pinn",
         entity="guzelmen_msci_project"
     )
 
-    # Log hyperparameters
-    wandb.config.update({
-        "random_seed": params.random_seed,
-        "mode": params.mode,
-        "nlayers": params.nlayers,
-        "hidden": params.hidden,
-        "w0": params.w0,
-        "start_lr": params.start_lr,
-        "end_lr": params.end_lr,
-        "lr_warmup_epochs": params.lr_warmup_epochs,
-        "min_lr": params.min_lr,
-        "loss_strategy": params.loss_strategy,
-        "relative_weights": params.relative_weights,
-        "batch_size": params.batch_size,
-        "stage": params.stage,
-        "epochs": params.epochs,
-    })
+    # Log all hyperparameters from config
+    # Convert params to dict to ensure all parameters are captured
+    config_dict = {}
+    for key in dir(params):
+        # Skip private attributes and methods
+        if not key.startswith('_') and not callable(getattr(params, key, None)):
+            try:
+                value = getattr(params, key)
+                # Only include serializable values (skip complex objects)
+                if isinstance(value, (int, float, str, bool, list, dict, type(None))):
+                    config_dict[key] = value
+            except (AttributeError, TypeError):
+                pass
+
+    wandb.config.update(config_dict)
 
     print("Logged hyperparameters to wandb config.")
 

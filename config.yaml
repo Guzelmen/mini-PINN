@@ -8,12 +8,15 @@ base_config: &BASE_CONFIG
 
   ## model parameters
   mode: "hard" # "soft" or "hard"
-  nlayers: 6
-  hidden: 128
+  nlayers: 4
+  hidden: 32
+  activation: "SiLU" # SiLU, ReLU, Identity, SIREN, GELU
   w0: 30
 
 
   ## optimizer parameters
+  lr_type: "constant" # constant, linear, linear with cosine decay...
+  constant_lr: 1e-4
   start_lr: 1e-5
   end_lr: 1e-3
   lr_warmup_epochs: 50
@@ -24,12 +27,12 @@ base_config: &BASE_CONFIG
   relative_weights: {"residual": 1.0, "bc_1": 1.0, "bc_2": 1.0}
 
   ## data parameters
-  data_path: "data/40kgridpoints_logr0_randZ.pt"
+  data_path: "data/40kgridpoints_logr0_randZ_noendpoints.pt"
   batch_size: 256
 
   ## training parameters
   stage: "train"
-  epochs: 500
-  save_every: 50
+  epochs: 50
+  save_every: 10
   weights_directory: "weights"
   

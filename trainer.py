@@ -8,9 +8,54 @@ from torch.optim.lr_scheduler import LambdaLR
 import math
 
 import time
-from losses import *
+from losses import compute_residual_loss, compute_bc_loss_1, compute_bc_loss_2, compute_total_loss
+from losses import LossWeighter
 from tqdm import tqdm
 import wandb
+import pickle
+
+
+def get_constant_scheduler(optimizer, constant_lr):
+    """
+    Create a constant learning rate scheduler (no scheduling).
+
+    Args:
+        optimizer: PyTorch optimizer
+        constant_lr: The constant learning rate to use
+
+    Returns:
+        LambdaLR scheduler (always returns 1.0 multiplier)
+    """
+    def lr_lambda(epoch):
+        return 1.0
+
+    return LambdaLR(optimizer, lr_lambda)
+
+
+def get_warmup_linear_scheduler(optimizer, warmup_epochs, start_lr, end_lr, total_epochs):
+    """
+    Create a learning rate scheduler with linear warmup followed by constant LR.
+
+    Args:
+        optimizer: PyTorch optimizer
+        warmup_epochs: Number of epochs to warm up
+        start_lr: Starting learning rate for warmup
+        end_lr: Target learning rate (constant after warmup)
+        total_epochs: Total number of training epochs
+
+    Returns:
+        LambdaLR scheduler
+    """
+    def lr_lambda(epoch):
+        if epoch < warmup_epochs:
+            # Linear warmup: from start_lr/end_lr to 1.0
+            warmup_ratio = epoch / warmup_epochs
+            return (start_lr / end_lr) * (1 - warmup_ratio) + 1.0 * warmup_ratio
+        else:
+            # Constant after warmup
+            return 1.0
+
+    return LambdaLR(optimizer, lr_lambda)
 
 
 def get_warmup_cosine_scheduler(optimizer, warmup_epochs, start_lr, end_lr, min_lr, total_epochs):
@@ -59,24 +104,48 @@ def trainer(
     weighter = LossWeighter(params)
 
     # Learning rate parameters
+    # Default to cosine if not specified
+    lr_type = params.get('lr_type', 'cos')
     warmup_epochs = params.lr_warmup_epochs
     start_lr = params.start_lr
     end_lr = params.end_lr
     min_lr = params.min_lr
 
-    # Initialize optimizer with peak LR (end_lr)
-    optimizer = Adam(model.parameters(), lr=end_lr)
+    # Initialize optimizer and scheduler based on lr_type
+    if lr_type == "constant":
+        constant_lr = params.constant_lr
+        optimizer = Adam(model.parameters(), lr=constant_lr)
+        scheduler = get_constant_scheduler(optimizer, constant_lr)
+        print(f"LR schedule: constant at {constant_lr:.2e}")
 
-    # Create scheduler with warmup + cosine decay
-    scheduler = get_warmup_cosine_scheduler(
-        optimizer, warmup_epochs, start_lr, end_lr, min_lr, epochs)
-    print(
-        f"LR schedule: {warmup_epochs} epochs warmup ({start_lr:.2e} -> {end_lr:.2e}), "
-        f"then cosine decay to {min_lr:.2e} over {epochs - warmup_epochs} epochs")
+    elif lr_type == "linear":
+        # Linear warmup then constant
+        optimizer = Adam(model.parameters(), lr=end_lr)
+        scheduler = get_warmup_linear_scheduler(
+            optimizer, warmup_epochs, start_lr, end_lr, epochs)
+        print(
+            f"LR schedule: {warmup_epochs} epochs warmup ({start_lr:.2e} -> {end_lr:.2e}), "
+            f"then constant at {end_lr:.2e}")
 
-    for ep in range(epochs):
+    elif lr_type == "cos" or lr_type == "cosine":
+        # Linear warmup + cosine decay
+        optimizer = Adam(model.parameters(), lr=end_lr)
+        scheduler = get_warmup_cosine_scheduler(
+            optimizer, warmup_epochs, start_lr, end_lr, min_lr, epochs)
+        print(
+            f"LR schedule: {warmup_epochs} epochs warmup ({start_lr:.2e} -> {end_lr:.2e}), "
+            f"then cosine decay to {min_lr:.2e} over {epochs - warmup_epochs} epochs")
+    else:
+        raise ValueError(
+            f"Unknown lr_type: {lr_type}. Choose from: constant, linear, cos/cosine")
+
+    predictions = {}
+    for ep in range(1, epochs+1):
         time_start = time.time()
         model.train()
+
+        epoch_inputs = []
+        epoch_outputs = []
 
         # Get current learning rate (will be updated at end of epoch)
         current_lr = optimizer.param_groups[0]['lr']
@@ -86,11 +155,13 @@ def trainer(
 
         # Collect raw losses for adaptive weighting (update once per epoch)
         raw_losses_for_weighting = {'residual': [], 'bc_1': [], 'bc_2': []}
+        # Collect gradient norms per batch for diagnostics
+        epoch_grad_norms = []
 
         train_loader_iter = tqdm(
-            train, desc=f"Epoch {ep+1}/{epochs}", leave=True, ncols=100)
+            train, desc=f"Epoch {ep}/{epochs}", leave=True, ncols=100)
 
-        for batch_idx, batch in enumerate(train_loader_iter):
+        for batch in train_loader_iter:
             # Extract x coordinates (first column), r0, Z from batch
             # Data shape: [batch_size, 3] where columns are [x, r0, Z]
             batch_data = batch[0]  # Unpack tuple from DataLoader
@@ -101,6 +172,11 @@ def trainer(
 
             # Forward pass
             outputs = model(x)
+
+            if ep % params.save_every == 0:
+                # Detach tensors before saving to avoid gradient tracking issues
+                epoch_inputs.append(x.detach())
+                epoch_outputs.append(outputs.detach())
 
             # Compute individual losses
             residual_loss = compute_residual_loss(outputs, x)
@@ -132,8 +208,16 @@ def trainer(
             optimizer.zero_grad()
             total_loss.backward()
 
-            # Gradient clipping for numerical stability (especially important for hard mode)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            # Record gradient norm before stepping
+            total_grad_sq = 0.0
+            num_params_with_grad = 0
+            for p in model.parameters():
+                if p.grad is not None:
+                    g = p.grad.detach()
+                    total_grad_sq += float(g.pow(2).sum().item())
+                    num_params_with_grad += 1
+            if num_params_with_grad > 0:
+                epoch_grad_norms.append(total_grad_sq ** 0.5)
 
             optimizer.step()
 
@@ -150,6 +234,16 @@ def trainer(
                 bc1=bc_1_loss.item(),
                 bc2=bc_2_loss.item()
             )
+
+        if ep % params.save_every == 0:
+            # Concatenate tensors first, then convert to numpy
+            inputs_all = torch.cat(epoch_inputs, dim=0).cpu().numpy()
+            outputs_all = torch.cat(epoch_outputs, dim=0).cpu().numpy()
+
+            predictions[ep] = {"inputs": inputs_all, "outputs": outputs_all}
+
+            print(
+                f"Saved epoch {ep}: {inputs_all.shape=} {outputs_all.shape=}")
 
         # Training epoch complete - compute averages before printing
         avg_residual = np.mean(epoch_losses['residual'])
@@ -178,7 +272,40 @@ def trainer(
 
         # Print epoch summary
         print(
-            f"Epoch {ep+1}/{epochs}: train loss = {avg_total:.6e}, time = {time_taken:.2f} s")
+            f"Epoch {ep}/{epochs}: train loss = {avg_total:.6e}, time = {time_taken:.2f} s")
+
+        # In hard mode, log hard-constraint checks using explicit probes at x=0 and x=1
+        checks = {}
+        if params.mode == "hard":
+            x0 = torch.tensor([[0.0]], device=next(
+                model.parameters()).device, requires_grad=True)
+            x1 = torch.tensor([[1.0]], device=next(
+                model.parameters()).device, requires_grad=True)
+            psi0 = model(x0)
+            psi1 = model(x1)
+            dpsi1_dx = torch.autograd.grad(
+                outputs=psi1,
+                inputs=x1,
+                grad_outputs=torch.ones_like(psi1),
+                create_graph=False,
+                retain_graph=False,
+                allow_unused=False
+            )[0]
+            # Convert to scalars for logging
+            psi0_err = torch.abs(psi0 - 1.0).mean().item()
+            psi1_minus_psiprime1 = torch.abs(psi1 - dpsi1_dx).mean().item()
+            checks = {
+                "checks/psi0_abs_error": psi0_err,
+                "checks/psi1_minus_psiprime1_abs": psi1_minus_psiprime1,
+            }
+
+        # Gradient norm stats
+        grad_stats = {}
+        if len(epoch_grad_norms) > 0:
+            grad_stats = {
+                "grads/epoch_grad_norm_mean": float(np.mean(epoch_grad_norms)),
+                "grads/epoch_grad_norm_max": float(np.max(epoch_grad_norms)),
+            }
 
         # Log to wandb
         wandb.log({
@@ -191,7 +318,9 @@ def trainer(
             "train/total_loss": avg_total,
             "weights/residual_weight": weighter.residual_weight,
             "weights/bc_1_weight": weighter.bc_1_weight,
-            "weights/bc_2_weight": weighter.bc_2_weight
+            "weights/bc_2_weight": weighter.bc_2_weight,
+            **checks,
+            **grad_stats,
         })
 
         # Validation
@@ -200,7 +329,7 @@ def trainer(
             model.eval()
             val_losses = {'residual': [], 'bc_1': [], 'bc_2': [], 'total': []}
 
-            for batch_idx, batch in enumerate(val):
+            for batch in val:
                 batch_data = batch[0]
                 x = batch_data[:, 0:1]
                 x.requires_grad_(True)  # Enable gradients for differentiation
@@ -248,5 +377,11 @@ def trainer(
                 "val/total_loss": avg_val_total,
                 "info/epoch_validation_time": time_taken_val
             })
+
+    save_path = f"predictions/{params.run_name}.pkl"
+    with open(save_path, "wb") as f:
+        pickle.dump(predictions, f)
+
+    print(f"Saved predictions for all selected epochs to {save_path}")
 
     return

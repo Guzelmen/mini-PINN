@@ -84,6 +84,7 @@ class Model2(nn.Module):
         hidden = params.hidden
         layers = params.nlayers
         w0 = params.w0
+        activation = params.activation
 
         # Direct input: x
         in_dim = 1
@@ -91,11 +92,25 @@ class Model2(nn.Module):
         self.hiddens = nn.ModuleList(
             [nn.Linear(hidden, hidden) for _ in range(layers-2)])
         self.out = nn.Linear(hidden, 1)
-        self.act = Siren(w0=w0)
-        # Siren init
-        siren_init(self.first, w0=w0, is_first=True)
-        for h in self.hiddens:
-            siren_init(h, w0=w0, is_first=False)
+
+        # Initialize activation function
+        if activation == "SiLU":
+            act = nn.SiLU()
+        elif activation == "Identity":
+            act = nn.Identity()
+        elif activation == "ReLU":
+            act = nn.ReLU()
+        elif activation == "SIREN":
+            act = Siren(w0=w0)
+            # Siren init
+            siren_init(self.first, w0=w0, is_first=True)
+            for h in self.hiddens:
+                siren_init(h, w0=w0, is_first=False)
+        else:
+            raise ValueError(
+                f"Unknown activation: {activation}. Choose from: SiLU, Identity, ReLU, SIREN")
+
+        self.act = act
         nn.init.zeros_(self.out.weight)
         nn.init.zeros_(self.out.bias)
 
