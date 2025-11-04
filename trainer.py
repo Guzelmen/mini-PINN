@@ -15,24 +15,23 @@ import wandb
 import pickle
 
 
-def get_constant_scheduler(optimizer, constant_lr):
+def get_constant_scheduler(optimizer):
     """
     Create a constant learning rate scheduler (no scheduling).
 
     Args:
         optimizer: PyTorch optimizer
-        constant_lr: The constant learning rate to use
 
     Returns:
         LambdaLR scheduler (always returns 1.0 multiplier)
     """
-    def lr_lambda(epoch):
+    def lr_lambda(_epoch):
         return 1.0
 
     return LambdaLR(optimizer, lr_lambda)
 
 
-def get_warmup_linear_scheduler(optimizer, warmup_epochs, start_lr, end_lr, total_epochs):
+def get_warmup_linear_scheduler(optimizer, warmup_epochs, start_lr, end_lr):
     """
     Create a learning rate scheduler with linear warmup followed by constant LR.
 
@@ -41,7 +40,6 @@ def get_warmup_linear_scheduler(optimizer, warmup_epochs, start_lr, end_lr, tota
         warmup_epochs: Number of epochs to warm up
         start_lr: Starting learning rate for warmup
         end_lr: Target learning rate (constant after warmup)
-        total_epochs: Total number of training epochs
 
     Returns:
         LambdaLR scheduler
@@ -115,14 +113,14 @@ def trainer(
     if lr_type == "constant":
         constant_lr = params.constant_lr
         optimizer = Adam(model.parameters(), lr=constant_lr)
-        scheduler = get_constant_scheduler(optimizer, constant_lr)
+        scheduler = get_constant_scheduler(optimizer)
         print(f"LR schedule: constant at {constant_lr:.2e}")
 
     elif lr_type == "linear":
         # Linear warmup then constant
         optimizer = Adam(model.parameters(), lr=end_lr)
         scheduler = get_warmup_linear_scheduler(
-            optimizer, warmup_epochs, start_lr, end_lr, epochs)
+            optimizer, warmup_epochs, start_lr, end_lr)
         print(
             f"LR schedule: {warmup_epochs} epochs warmup ({start_lr:.2e} -> {end_lr:.2e}), "
             f"then constant at {end_lr:.2e}")
