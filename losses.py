@@ -1,11 +1,11 @@
 import torch
 
 
-def compute_residual_loss(outputs, inputs):
+def compute_residual_loss_phase1(outputs, inputs):
     """
     Computes the PDE residual loss.
 
-    The PDE is: 1/x^2 * d^2(x*f(x))/dx^2 = 3/(4*pi)
+    The PDE is: d^2(f(x))/dx^2 = 3x
     where f(x) = Psi(x) is the model output
 
     Args:
@@ -89,7 +89,7 @@ def compute_residual_loss(outputs, inputs):
     return residual_loss
 
 
-def compute_bc_loss_1(outputs, inputs):
+def compute_bc_loss_1_phase1(outputs, inputs):
     """
     Computes boundary condition loss at x=1.
 
@@ -175,7 +175,7 @@ def compute_bc_loss_1(outputs, inputs):
     return bc_loss
 
 
-def compute_bc_loss_2(outputs, inputs):
+def compute_bc_loss_2_phase1(outputs, inputs):
     """
     Computes boundary condition loss at x=0.
 
@@ -229,7 +229,7 @@ def compute_bc_loss_2(outputs, inputs):
     return bc_loss
 
 
-class LossWeighter:
+class LossWeighter_phase1:
     """Handles different loss weighting strategies."""
 
     def __init__(self, params):
@@ -305,7 +305,7 @@ class LossWeighter:
         return total
 
 
-def compute_total_loss(loss_dict, weighter):
+def compute_total_loss_phase1(loss_dict, weighter):
     """
     Compute total weighted loss from individual loss components.
 

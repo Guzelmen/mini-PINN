@@ -26,7 +26,7 @@ def siren_init(layer, w0=30.0, is_first=False):
         layer.bias.zero_()
 
 
-class Model1(nn.Module):
+class Model_soft_phase1(nn.Module):
     """
     Inputs: x in [0,1]. Output: Psi(x).
     Uses direct input with Siren MLP.
@@ -68,7 +68,7 @@ class Model1(nn.Module):
         return Psi
 
 
-class Model2(nn.Module):
+class Model_hard_phase1(nn.Module):
     """
     Inputs: x in [0,1]. Output: Psi(x).
     Uses direct input with Siren MLP.

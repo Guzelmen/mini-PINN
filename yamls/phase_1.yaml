@@ -6,6 +6,9 @@ base_config: &BASE_CONFIG
     ## parameters
   random_seed: 42
 
+  phase: 1
+  run_name: "phase1_hardmode_1D_data"
+
   ## model parameters
   mode: "hard" # "soft" or "hard"
   nlayers: 4

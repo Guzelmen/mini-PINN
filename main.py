@@ -2,7 +2,7 @@
 Will run training and inference from here.
 """
 import random
-from models import Model1, Model2
+import models
 from trainer import trainer
 from data_utils.loader import load_data, get_data_loaders
 import torch
@@ -15,15 +15,15 @@ warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--name", required=True)
+    parser.add_argument("--config", required=True)
     args = parser.parse_args()
 
-    params = YParams("config.yaml", "base_config", print_params=True)
+    yaml = args.config
 
-    params.run_name = args.name
+    params = YParams(f"yamls/{yaml}.yaml", "base_config", print_params=True)
 
     wandb.init(
-        name=str(args.name),
+        name=params.run_name,
         project="mini_pinn",
         entity="guzelmen_msci_project"
     )
@@ -60,12 +60,22 @@ if __name__ == "__main__":
     val_loader = data_loaders["val"]
     test_loader = data_loaders["test"]
 
-    if params.mode == "soft":
-        model = Model1(params)
-    elif params.mode == "hard":
-        model = Model2(params)
-    else:
-        raise ValueError(f"Invalid mode: {params.mode}")
+    # Dynamic model selection based on mode and phase
+    if not hasattr(params, 'mode'):
+        raise ValueError("Parameter 'mode' is missing from config.")
+    if not hasattr(params, 'phase'):
+        raise ValueError("Parameter 'phase' is missing from config.")
+
+    mode = str(params.mode).strip()
+    phase = int(params.phase)
+
+    model_class_name = f"Model_{mode}_phase{phase}"
+    if not hasattr(models, model_class_name):
+        raise ValueError(
+            f"Model class '{model_class_name}' not found. Define it or adjust mode/phase "
+            f"(mode={mode}, phase={phase}).")
+    ModelClass = getattr(models, model_class_name)
+    model = ModelClass(params)
 
     if params.stage == "train":
         # train the model
