@@ -59,6 +59,33 @@ def cartesian(x, r0, Z):
     return torch.cat([xT, r0T, ZT], dim=1)
 
 
+def generate_x_r0_64k(out_path="./data/64k_x_r0_log.pt", seed=42, n_points=64000):
+    """
+    Generate dataset with n_points (default 64k) points and 2 columns [x, r0]:
+      - x: evenly spaced in (0.0001, 0.9999), shape [n_points, 1]
+      - r0: log-uniform in [1e-9, 1e-5], shape [n_points, 1]
+    Saves dict with keys: 'X', 'x_minmax', 'r0_range', 'seed'.
+    """
+    set_seed(seed)
+    # x grid (exclusive endpoints per spec)
+    x = torch.linspace(0.0001, 0.9999, n_points).view(-1, 1)
+    # r0 ~ log-uniform between 1e-9 and 1e-5
+    g = torch.Generator().manual_seed(seed)
+    exp_min, exp_max = -9.0, -5.0
+    u = torch.rand(n_points, 1, generator=g)  # uniform [0,1]
+    exps = exp_min + (exp_max - exp_min) * u
+    r0 = 10.0 ** exps
+    X = torch.cat([x, r0], dim=1)
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {"X": X, "x_minmax": (0.0001, 0.9999), "r0_range": (
+            1e-9, 1e-5), "seed": seed},
+        out_path,
+    )
+    print(f"Saved 2-column dataset with {X.shape[0]} points to {out_path}")
+    print(f"  x in (0.0001, 0.9999), r0 log-uniform in [1e-9, 1e-5]")
+
+
 def main(out_path="./data/40kgridpoints_logr0_randZ_noendpoints.pt", seed=42, n_points=40000):
     """
     Generate dataset with n_points (default 40k) points.
@@ -97,4 +124,4 @@ def main(out_path="./data/40kgridpoints_logr0_randZ_noendpoints.pt", seed=42, n_
 
 
 if __name__ == "__main__":
-    main()
+    generate_x_r0_64k()

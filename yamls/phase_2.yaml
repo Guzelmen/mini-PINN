@@ -7,7 +7,7 @@ base_config: &BASE_CONFIG
   random_seed: 42
 
   phase: 1
-  run_name: "phase1_hardmode_1D_data"
+  run_name: "phase2_hardmode_1D_data"
 
   ## model parameters
   mode: "hard" # "soft" or "hard"
@@ -18,7 +18,7 @@ base_config: &BASE_CONFIG
 
 
   ## wandb parameters
-  wandb_group: "phase_1"
+  wandb_group: "phase_2"
   wandb_project: "mini_pinn"
   wandb_entity: "guzelmen_msci_project"
 
@@ -36,8 +36,8 @@ base_config: &BASE_CONFIG
   relative_weights: {"residual": 1.0, "bc_1": 1.0, "bc_2": 1.0}
 
   ## data parameters
-  data_path: "data/40kgridpoints_logr0_randZ_noendpoints.pt"
-  batch_size: 256
+  data_path: "data/64k_x_log_r0.pt"
+  batch_size: 512
 
   ## training parameters
   stage: "train"
