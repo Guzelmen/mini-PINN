@@ -241,7 +241,148 @@ def plot_pred_general(filename: str, enable_fit: bool = False):
     plt.close(fig)
 
 
+def plot_pred_specific(filename: str, func: str):
+    """
+    Fit and plot a specific function over model predictions.
+    - filename: same as other plotters (without extension), loads predictions/{filename}.pkl
+    - func: one of {"poly2","poly3","poly4","exp","stretch_exp","power"}
+    Saves to plot_predictions/{filename}_{func}.png
+    """
+    pkl = f"predictions/{filename}.pkl"
+    with open(pkl, "rb") as f:
+        data = pickle.load(f)
+
+    epochs = list(data.keys())
+    n_epochs = len(epochs)
+    cols = math.ceil(math.sqrt(n_epochs * 1.5))
+    rows = math.ceil(n_epochs / cols)
+
+    fig, axes = plt.subplots(rows, cols, figsize=(cols * 4, rows * 3))
+    axes = axes.flatten()
+
+    # Define candidate functions (same forms as in plot_pred_general)
+    def poly2(x, a0, a1, a2):
+        return a0 + a1 * x + a2 * x**2
+
+    def poly3(x, a0, a1, a2, a3):
+        return a0 + a1 * x + a2 * x**2 + a3 * x**3
+
+    def poly4(x, a0, a1, a2, a3, a4):
+        return a0 + a1 * x + a2 * x**2 + a3 * x**3 + a4 * x**4
+
+    def exp1(x, a, b, c):
+        return a * np.exp(b * x) + c
+
+    def stretch_exp(x, a, b, c, d):
+        return a * np.exp(b * np.power(np.clip(x, 1e-8, None), c)) + d
+
+    def power1(x, a, b, c):
+        return a * np.power(np.clip(x, 1e-8, None), b) + c
+
+    mapping = {
+        "poly2": poly2,
+        "poly3": poly3,
+        "poly4": poly4,
+        "exp": exp1,
+        "stretch_exp": stretch_exp,
+        "power": power1,
+    }
+
+    if func not in mapping:
+        raise ValueError(
+            f"Unknown func '{func}'. Expected one of {list(mapping.keys())}.")
+
+    chosen_fn = mapping[func]
+
+    best_params = None
+    best_cov = None
+
+    for ax, e in zip(axes, epochs):
+        inputs = data[e]["inputs"].flatten()
+        outputs = data[e]["outputs"].flatten()
+
+        sort_idx = np.argsort(inputs)
+        x = inputs[sort_idx]
+        y = outputs[sort_idx]
+
+        ax.plot(x, y, '+', color="black", label='Model Predictions')
+
+        params, cov, *_ = curve_fit(chosen_fn, x, y, maxfev=20000)
+        y_hat = chosen_fn(x, *params)
+        ax.plot(x, y_hat, color="red", label='Fit')
+
+        # Store last params/cov for legend formatting; legend shows for each subplot anyway
+        best_params = params
+        best_cov = cov
+
+        ax.set_xlabel('x')
+        ax.set_ylabel(r'$\psi(x)$')
+        ax.set_title(f"Epoch: {e}")
+        legend = ax.legend(loc='best', framealpha=0.9)
+
+        # Legend details with parameter uncertainties
+        if best_params is not None and best_cov is not None:
+            errs = np.sqrt(np.clip(np.diag(best_cov), 0.0, None))
+            if func in ("poly2", "poly3", "poly4"):
+                deg = len(best_params) - 1
+                terms = []
+                for k in range(deg, -1, -1):
+                    coeff = best_params[k]
+                    err = errs[k] if k < len(errs) else 0.0
+                    if k >= 2:
+                        terms.append(f"({coeff:.3g} ± {err:.2g}) $x^{{{k}}}$")
+                    elif k == 1:
+                        terms.append(f"({coeff:.3g} ± {err:.2g}) $x$")
+                    else:
+                        terms.append(f"({coeff:.3g} ± {err:.2g})")
+                fit_label_text = f"Fit ({func}): " + "\n+ ".join(terms)
+            elif func == "exp":
+                a, b, c = best_params
+                ea, eb, ec = errs[:3]
+                fit_label_text = (
+                    "Fit (exp): $a e^{b x} + c$\n"
+                    f"a={a:.3g} ± {ea:.2g}\n"
+                    f"b={b:.3g} ± {eb:.2g}\n"
+                    f"c={c:.3g} ± {ec:.2g}"
+                )
+            elif func == "stretch_exp":
+                a, b, c, d = best_params
+                ea, eb, ec, ed = errs[:4]
+                fit_label_text = (
+                    "Fit (stretch exp): $a e^{b x^{c}} + d$\n"
+                    f"a={a:.3g} ± {ea:.2g}\n"
+                    f"b={b:.3g} ± {eb:.2g}\n"
+                    f"c={c:.3g} ± {ec:.2g}\n"
+                    f"d={d:.3g} ± {ed:.2g}"
+                )
+            elif func == "power":
+                a, b, c = best_params
+                ea, eb, ec = errs[:3]
+                fit_label_text = (
+                    "Fit (power): $a x^{b} + c$\n"
+                    f"a={a:.3g} ± {ea:.2g}\n"
+                    f"b={b:.3g} ± {eb:.2g}\n"
+                    f"c={c:.3g} ± {ec:.2g}"
+                )
+            else:
+                parts = []
+                for i, (p, ep) in enumerate(zip(best_params, errs)):
+                    parts.append(f"p{i}={p:.3g} ± {ep:.2g}")
+                fit_label_text = f"Fit ({func}): \n" + "\n".join(parts)
+
+            for text in legend.get_texts():
+                if text.get_text() == 'Fit':
+                    text.set_text(fit_label_text)
+
+    for ax in axes[len(epochs):]:
+        ax.set_visible(False)
+
+    fig.tight_layout()
+    fig.savefig(f"plot_predictions/{filename}_{func}.png")
+    plt.close(fig)
+
+
 if __name__ == "__main__":
     # remember to change name each time, might want to automate it somehow
-    plot_pred_general(
-        "phase2_hardmode_update_model_coeff_1_300ep", enable_fit=True)
+    plot_pred_specific(
+        "phase2_hardmode_update_model_coeff_1_300ep", func="power")
