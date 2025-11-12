@@ -147,3 +147,84 @@ class Model_hard_phase1(nn.Module):
         Psi = x**2 + 1 + x*N + x*(1-x)*N_prime
 
         return Psi
+
+
+class Model_hard_phase2(nn.Module):
+    """
+    Inputs: x in [0,1]. Output: Psi(x).
+    Uses direct input with diff activation types.
+    Hard constraint: transform to ensure 2 constraints:
+     - Psi(0) = 1
+     - Psi(1) = Psi'(1)
+    Tranform: Psi(x) = x^2 + 1 + xN(x) + x(1 - x)N'(x)
+    """
+
+    def __init__(self, params):
+        super().__init__()
+        # Get hyperparameters from config
+        hidden = params.hidden
+        layers = params.nlayers
+        w0 = params.w0
+        activation = params.activation
+
+        # Direct input: x
+        in_dim = 1
+        self.first = nn.Linear(in_dim, hidden)
+        self.hiddens = nn.ModuleList(
+            [nn.Linear(hidden, hidden) for _ in range(layers-2)])
+        self.out = nn.Linear(hidden, 1)
+
+        # Initialize activation function
+        if activation == "SiLU":
+            act = nn.SiLU()
+        elif activation == "Identity":
+            act = nn.Identity()
+        elif activation == "ReLU":
+            act = nn.ReLU()
+        elif activation == "SIREN":
+            act = Siren(w0=w0)
+            # Siren init
+            siren_init(self.first, w0=w0, is_first=True)
+            for h in self.hiddens:
+                siren_init(h, w0=w0, is_first=False)
+        else:
+            raise ValueError(
+                f"Unknown activation: {activation}. Choose from: SiLU, Identity, ReLU, SIREN")
+
+        self.act = act
+        nn.init.zeros_(self.out.weight)
+        nn.init.zeros_(self.out.bias)
+
+    def forward(self, x):
+        """
+        Args:
+            x: shape N
+
+        Returns:
+            Psi: shape N
+        """
+        # Don't detach! x already has requires_grad=True from trainer
+        # We need the graph connection for higher-order derivatives
+        h = self.act(self.first(x))
+        for layer in self.hiddens:
+            h = self.act(layer(h))
+        N = self.out(h)
+        N_prime_outputs = torch.autograd.grad(
+            N, x,
+            grad_outputs=torch.ones_like(N),
+            create_graph=True,  # needed if you want higher derivatives later
+            retain_graph=True,  # only needed if you reuse graph, safe to include for now
+            only_inputs=True,   # Only compute gradients w.r.t. x
+            allow_unused=False  # Should not be unused - raise error if disconnected
+        )
+
+        if len(N_prime_outputs) == 0 or N_prime_outputs[0] is None:
+            raise RuntimeError(
+                "N_prime computation failed in Model2. "
+                "Check that x is properly connected in the computational graph."
+            )
+        N_prime = N_prime_outputs[0]
+
+        Psi = x**2 + 1 + x*N + x*(1-x)*N_prime
+
+        return Psi

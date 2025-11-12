@@ -8,8 +8,7 @@ from torch.optim.lr_scheduler import LambdaLR
 import math
 
 import time
-from losses import compute_residual_loss, compute_bc_loss_1, compute_bc_loss_2, compute_total_loss
-from losses import LossWeighter
+import losses
 from tqdm import tqdm
 import wandb
 import pickle
@@ -99,7 +98,9 @@ def trainer(
     epochs = params.epochs
 
     # Initialize LossWeighter
-    weighter = LossWeighter(params)
+    weighter_name = f"LossWeighter_phase{params.phase}"
+    Weighterclass = getattr(losses, weighter_name)
+    weighter = Weighterclass(params)
 
     # Learning rate parameters
     # Default to cosine if not specified
@@ -177,11 +178,17 @@ def trainer(
                 epoch_outputs.append(outputs.detach())
 
             # Compute individual losses
-            residual_loss = compute_residual_loss(outputs, x)
+            residual_name = f"compute_residual_loss_phase{params.phase}"
+            residual_fn = getattr(losses, residual_name)
+            residual_loss = residual_fn(outputs, x)
 
             if params.mode == "soft":
-                bc_1_loss = compute_bc_loss_1(outputs, x)
-                bc_2_loss = compute_bc_loss_2(outputs, x)
+                bc1name = f"compute_bc_loss_1_phase{params.phase}"
+                bc2name = f"compute_bc_loss_2_phase{params.phase}"
+                bc1_fn = getattr(losses, bc1name)
+                bc2_fn = getattr(losses, bc2name)
+                bc_1_loss = bc1_fn(outputs, x)
+                bc_2_loss = bc2_fn(outputs, x)
             else:
                 bc_1_loss = torch.tensor(0.0, device=outputs.device)
                 bc_2_loss = torch.tensor(0.0, device=outputs.device)
@@ -200,7 +207,9 @@ def trainer(
                 raw_losses_for_weighting['bc_1'].append(bc_1_loss.detach())
                 raw_losses_for_weighting['bc_2'].append(bc_2_loss.detach())
 
-            total_loss = compute_total_loss(loss_dict, weighter)
+            totlossname = f"compute_total_loss_phase{params.phase}"
+            totloss_fn = getattr(losses, totlossname)
+            total_loss = totloss_fn(loss_dict, weighter)
 
             # Backpropagation
             optimizer.zero_grad()
@@ -335,12 +344,18 @@ def trainer(
                 # Forward pass (needs gradients for loss computation)
                 outputs = model(x)
 
-                # Compute losses (which require gradients)
-                residual_loss = compute_residual_loss(outputs, x)
+                # Compute individual losses
+                residual_name = f"compute_residual_loss_phase{params.phase}"
+                residual_fn = getattr(losses, residual_name)
+                residual_loss = residual_fn(outputs, x)
 
                 if params.mode == "soft":
-                    bc_1_loss = compute_bc_loss_1(outputs, x)
-                    bc_2_loss = compute_bc_loss_2(outputs, x)
+                    bc1name = f"compute_bc_loss_1_phase{params.phase}"
+                    bc2name = f"compute_bc_loss_2_phase{params.phase}"
+                    bc1_fn = getattr(losses, bc1name)
+                    bc2_fn = getattr(losses, bc2name)
+                    bc_1_loss = bc1_fn(outputs, x)
+                    bc_2_loss = bc2_fn(outputs, x)
                 else:
                     bc_1_loss = torch.tensor(0.0, device=outputs.device)
                     bc_2_loss = torch.tensor(0.0, device=outputs.device)

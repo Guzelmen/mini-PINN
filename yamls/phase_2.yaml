@@ -6,8 +6,8 @@ base_config: &BASE_CONFIG
     ## parameters
   random_seed: 42
 
-  phase: 1
-  run_name: "phase2_hardmode_1D_data"
+  phase: 2
+  run_name: "phase2_hardmode_update_model_coeff_1_300ep"
 
   ## model parameters
   mode: "hard" # "soft" or "hard"
@@ -41,7 +41,7 @@ base_config: &BASE_CONFIG
 
   ## training parameters
   stage: "train"
-  epochs: 50
-  save_every: 10
+  epochs: 300
+  save_every: 50
   weights_directory: "weights"
   

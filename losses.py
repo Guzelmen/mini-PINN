@@ -323,3 +323,135 @@ def compute_total_loss_phase1(loss_dict, weighter):
     total_loss = weighter.get_weighted_loss(loss_dict)
 
     return total_loss
+
+
+# =========================
+# Phase 2 losses
+# =========================
+
+def compute_residual_loss_phase2(outputs, inputs):
+    """
+    Nonlinear TF residual for phase 2:
+        psi''(x) = B * x^{-1/2} * [psi(x)]^{3/2}
+
+    Changed to:
+        psi''(x) * x^(1/2) - psi(x)^3/2 = 0
+
+    Defined B as 1, and x not in denominator.
+
+    Args:
+        outputs: phi(x) predictions, shape [batch, 1] (requires_grad=True)
+        inputs: x coordinates, shape [batch, 1] (requires_grad=True)
+
+    Returns:
+        residual loss: mean squared residual over the batch
+    """
+    x = inputs
+    # Ensure outputs have shape [batch, 1]
+    if len(outputs.shape) == 2 and outputs.shape[1] == 1:
+        psi = outputs
+    elif len(outputs.shape) == 1:
+        psi = outputs.unsqueeze(1)
+    else:
+        psi = outputs
+
+    # First derivative
+    dpsi_dx_out = torch.autograd.grad(
+        outputs=psi,
+        inputs=x,
+        grad_outputs=torch.ones_like(psi),
+        create_graph=True,
+        retain_graph=True,
+        only_inputs=True,
+        allow_unused=False
+    )
+    if len(dpsi_dx_out) == 0 or dpsi_dx_out[0] is None:
+        raise RuntimeError(
+            "Phase2: dpsi/dx computation failed; check graph connectivity.")
+    dpsi_dx = dpsi_dx_out[0]
+
+    # Second derivative
+    d2psi_dx2_out = torch.autograd.grad(
+        outputs=dpsi_dx,
+        inputs=x,
+        grad_outputs=torch.ones_like(dpsi_dx),
+        create_graph=True,
+        retain_graph=True,
+        only_inputs=True,
+        allow_unused=False
+    )
+    if len(d2psi_dx2_out) == 0 or d2psi_dx2_out[0] is None:
+        raise RuntimeError(
+            "Phase2: d2psi/dx2 computation failed; check graph connectivity.")
+    d2psi_dx2 = d2psi_dx2_out[0]
+
+    # not clamping psi to positive for now, let's see how it goes
+    residual = d2psi_dx2 * x**0.5 - psi**1.5
+    return torch.mean(residual ** 2)
+
+
+def compute_bc_loss_1_phase2(outputs, inputs):
+    """
+    Enforce robin: psi'(1) = psi(1)
+    """
+    bc1_phase2 = compute_bc_loss_1_phase1(outputs, inputs)
+    return bc1_phase2
+
+
+def compute_bc_loss_2_phase2(outputs, inputs):
+    """
+    Computes boundary condition loss at x=0.
+
+    Psi(0) = 1
+    """
+    bc2_phase2 = compute_bc_loss_2_phase1(outputs, inputs)
+    return bc2_phase2
+
+
+class LossWeighter_phase2:
+    """Handles loss weighting for Phase 2 (mirrors Phase 1 behavior)."""
+
+    def __init__(self, params):
+        self.mode = params.mode  # "soft" or "hard"
+        self.strategy = params.loss_strategy  # "fixed" or "adaptive"
+
+        if self.mode == "hard":
+            self.residual_weight = 1.0
+            self.bc_1_weight = 0.0
+            self.bc_2_weight = 0.0
+        else:
+            self.residual_weight = params.relative_weights["residual"]
+            self.bc_1_weight = params.relative_weights["bc_1"]
+            self.bc_2_weight = params.relative_weights["bc_2"]
+
+    def update_weights(self, loss_dict):
+        if self.strategy == 'adaptive' and self.mode == 'soft':
+            loss_mags = {}
+            for key in ["residual", "bc_1", "bc_2"]:
+                if key in loss_dict:
+                    val = loss_dict[key].detach().item()
+                    loss_mags[key] = max(val, 1e-8)
+            if not loss_mags:
+                return
+            avg_mag = sum(loss_mags.values()) / len(loss_mags)
+            if "residual" in loss_mags:
+                self.residual_weight = avg_mag / loss_mags["residual"]
+            if "bc_1" in loss_mags:
+                self.bc_1_weight = avg_mag / loss_mags["bc_1"]
+            if "bc_2" in loss_mags:
+                self.bc_2_weight = avg_mag / loss_mags["bc_2"]
+
+    def get_weighted_loss(self, loss_dict):
+        total = 0.0
+        if "residual" in loss_dict:
+            total += self.residual_weight * loss_dict["residual"]
+        if self.mode == "soft":
+            if "bc_1" in loss_dict:
+                total += self.bc_1_weight * loss_dict["bc_1"]
+            if "bc_2" in loss_dict:
+                total += self.bc_2_weight * loss_dict["bc_2"]
+        return total
+
+
+def compute_total_loss_phase2(loss_dict, weighter):
+    return weighter.get_weighted_loss(loss_dict)

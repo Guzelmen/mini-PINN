@@ -24,8 +24,9 @@ if __name__ == "__main__":
 
     wandb.init(
         name=params.run_name,
-        project="mini_pinn",
-        entity="guzelmen_msci_project"
+        group=params.wandb_group,
+        project=params.wandb_project,
+        entity=params.wandb_entity
     )
 
     # Log all hyperparameters from config

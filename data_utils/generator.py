@@ -59,7 +59,7 @@ def cartesian(x, r0, Z):
     return torch.cat([xT, r0T, ZT], dim=1)
 
 
-def generate_x_r0_64k(out_path="./data/64k_x_r0_log.pt", seed=42, n_points=64000):
+def generate_x_r0_64k(out_path="./data/64k_x_log_r0.pt", seed=42, n_points=64000):
     """
     Generate dataset with n_points (default 64k) points and 2 columns [x, r0]:
       - x: evenly spaced in (0.0001, 0.9999), shape [n_points, 1]
