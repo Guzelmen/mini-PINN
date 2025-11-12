@@ -22,11 +22,17 @@ Functions, classes, variables... with a "phase_1" in their name, refer to the fi
 
 Functions, classes, variables... with a "phase_2" in their name, refer to the second experiment considered, less simplified but still no T.
 
+*Need to complete.*
+
 
 ### PINN architecture
 
+*Need to add.*
+
 
 ### Constraint types
+
+*Need to add.*
 
 
 ### How it works
