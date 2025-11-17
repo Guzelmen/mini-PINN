@@ -7,11 +7,12 @@ base_config: &BASE_CONFIG
   random_seed: 42
 
   phase: 2
-  run_name: "phase2_hardmode_update_model_coeff_1_300ep"
+  run_name: "firsttry_newpde"
+  inp_dim: 2
 
   ## model parameters
   mode: "hard" # "soft" or "hard"
-  nlayers: 4
+  nlayers: 6
   hidden: 32
   activation: "SiLU" # SiLU, ReLU, Identity, SIREN, GELU
   w0: 30
@@ -24,11 +25,11 @@ base_config: &BASE_CONFIG
 
 
   ## optimizer parameters
-  lr_type: "constant" # constant, linear, linear with cosine decay...
+  lr_type: "cosine" # constant, linear, linear with cosine decay...
   constant_lr: 1e-4
   start_lr: 1e-5
-  end_lr: 1e-3
-  lr_warmup_epochs: 50
+  end_lr: 5e-4
+  lr_warmup_epochs: 100
   min_lr: 1e-5  # Minimum LR for cosine decay
 
   ## loss parameters
@@ -41,7 +42,7 @@ base_config: &BASE_CONFIG
 
   ## training parameters
   stage: "train"
-  epochs: 300
-  save_every: 50
+  epochs: 500
+  save_every: 100
   weights_directory: "weights"
   

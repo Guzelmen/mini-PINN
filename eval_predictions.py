@@ -382,7 +382,121 @@ def plot_pred_specific(filename: str, func: str):
     plt.close(fig)
 
 
+def plot_pred_fmt_power(filename: str, number=3):
+    """
+    Fit and plot a specific function over model predictions.
+    - filename: same as other plotters (without extension), loads predictions/{filename}.pkl
+    - number: number of coefficients in the Feynman-Metropolis-Teller power series 
+              approximation to do, default is 3.
+
+    Saves to plot_predictions/{filename}_fmt_power.png
+    """
+    pkl = f"predictions/{filename}.pkl"
+    with open(pkl, "rb") as f:
+        data = pickle.load(f)
+
+    epochs = list(data.keys())
+    n_epochs = len(epochs)
+    cols = math.ceil(math.sqrt(n_epochs * 1.5))
+    rows = math.ceil(n_epochs / cols)
+
+    fig, axes = plt.subplots(rows, cols, figsize=(cols * 4, rows * 3), dpi=400)
+    axes = axes.flatten()
+
+    def series(x, a2):
+        coeff_exp = np.array([
+            [a2, 1],
+            [4/3, 1.5],
+            [0, 2],
+            [2/5*a2, 2.5],
+            [1/3, 3],
+            [3/70*a2, 3.5],
+            [2/15*a2, 4],
+            [(2/27 - 1/252 * a2**3), 4.5],
+            [(1/175 * a2**2), 5],
+            [(31/1485 * a2 + 1/1056 * a2**4), 5.5]], dtype=float)
+
+        y = np.ones_like(x, dtype=float)
+        k = min(number, len(coeff_exp))
+        for i in range(k):
+            y += coeff_exp[i][0] * x**coeff_exp[i][1]
+
+        return y
+
+    best_params = None
+    best_cov = None
+
+    for ax, e in zip(axes, epochs):
+        inputs = data[e]["inputs"].flatten()
+        outputs = data[e]["outputs"].flatten()
+
+        sort_idx = np.argsort(inputs)
+        x = inputs[sort_idx]
+        y = outputs[sort_idx]
+
+        ax.plot(x, y, '+', color="black", ms=0.5, label='Model Predictions')
+
+        params, cov, *_ = curve_fit(series, x, y, maxfev=20000)
+        y_hat = series(x, *params)
+        # ax.plot(x, y_hat, color="red", label='Fit')
+
+        # Store last params/cov for legend formatting; legend shows for each subplot anyway
+        best_params = params
+        best_cov = cov
+
+        ax.set_xlabel('x')
+        ax.set_ylabel(r'$\psi(x)$')
+        ax.set_title(f"Epoch: {e}")
+        # legend = ax.legend(loc='best', framealpha=0.9)
+
+        # Legend details with parameter uncertainties
+        if best_params is not None and best_cov is not None:
+            # a2 and its standard error
+            a2 = float(best_params[0])
+            coeff_exp = np.array([
+                [a2, 1],
+                [4/3, 1.5],
+                [0, 2],
+                [2/5*a2, 2.5],
+                [1/3, 3],
+                [3/70*a2, 3.5],
+                [2/15*a2, 4],
+                [(2/27 - 1/252 * a2**3), 4.5],
+                [(1/175 * a2**2), 5],
+                [(31/1485 * a2 + 1/1056 * a2**4), 5.5]], dtype=float)
+
+            err_a2 = float(np.sqrt(max(best_cov[0, 0], 0.0)))
+            # print uncertainty to terminal
+            print(f"Epoch {e}: a2 = {a2:.6g} +/- {err_a2:.6g}")
+
+            fit_label_text = "1 "
+            k = min(number, len(coeff_exp))
+            for i in range(k):
+                co = coeff_exp[i][0]
+                exp = coeff_exp[i][1]
+                exp_val = float(exp)
+                if abs(exp_val - round(exp_val)) < 1e-12:
+                    int_exp = int(round(exp_val))
+                    if int_exp == 1:
+                        power_str = "x"
+                    else:
+                        power_str = f"x^{{{int_exp}}}"
+                else:
+                    power_str = f"x^{{{exp_val:g}}}"
+                fit_label_text = fit_label_text + f"+ {co:.3g} ${power_str}$\n"
+
+            # for text in legend.get_texts():
+            #    if text.get_text() == 'Fit':
+            #        text.set_text(fit_label_text)
+
+    for ax in axes[len(epochs):]:
+        ax.set_visible(False)
+
+    fig.tight_layout()
+    fig.savefig(f"plot_predictions/{filename}_fmt_power_deg{k}.png")
+    plt.close(fig)
+
+
 if __name__ == "__main__":
     # remember to change name each time, might want to automate it somehow
-    plot_pred_specific(
-        "phase2_hardmode_update_model_coeff_1_300ep", func="power")
+    plot_pred_fmt_power("phase2_hardmode_deeper_1000ep", number=13)

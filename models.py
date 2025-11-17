@@ -167,8 +167,8 @@ class Model_hard_phase2(nn.Module):
         w0 = params.w0
         activation = params.activation
 
-        # Direct input: x
-        in_dim = 1
+        # Direct inputs: x, r0
+        in_dim = 2
         self.first = nn.Linear(in_dim, hidden)
         self.hiddens = nn.ModuleList(
             [nn.Linear(hidden, hidden) for _ in range(layers-2)])
@@ -195,7 +195,7 @@ class Model_hard_phase2(nn.Module):
         nn.init.zeros_(self.out.weight)
         nn.init.zeros_(self.out.bias)
 
-    def forward(self, x):
+    def forward(self, inputs):
         """
         Args:
             x: shape N
@@ -203,14 +203,17 @@ class Model_hard_phase2(nn.Module):
         Returns:
             Psi: shape N
         """
-        # Don't detach! x already has requires_grad=True from trainer
-        # We need the graph connection for higher-order derivatives
-        h = self.act(self.first(x))
+        # Use the same input tensor used to compute N. Do not clone/detach,
+        # otherwise the gradient path between N and x breaks.
+        x = inputs[:, 0:1]
+        h = self.act(self.first(inputs))
         for layer in self.hiddens:
             h = self.act(layer(h))
         N = self.out(h)
-        N_prime_outputs = torch.autograd.grad(
-            N, x,
+        # Compute gradients of N with respect to the full inputs (x, r0)
+        # and then select the x-component to obtain dN/dx.
+        N_grad_wrt_inputs = torch.autograd.grad(
+            N, inputs,
             grad_outputs=torch.ones_like(N),
             create_graph=True,  # needed if you want higher derivatives later
             retain_graph=True,  # only needed if you reuse graph, safe to include for now
@@ -218,12 +221,13 @@ class Model_hard_phase2(nn.Module):
             allow_unused=False  # Should not be unused - raise error if disconnected
         )
 
-        if len(N_prime_outputs) == 0 or N_prime_outputs[0] is None:
+        if len(N_grad_wrt_inputs) == 0 or N_grad_wrt_inputs[0] is None:
             raise RuntimeError(
                 "N_prime computation failed in Model2. "
                 "Check that x is properly connected in the computational graph."
             )
-        N_prime = N_prime_outputs[0]
+        # Take the derivative with respect to x (column 0)
+        N_prime = N_grad_wrt_inputs[0][:, 0:1]
 
         Psi = x**2 + 1 + x*N + x*(1-x)*N_prime
 

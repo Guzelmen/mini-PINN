@@ -8,6 +8,7 @@ base_config: &BASE_CONFIG
 
   phase: 1
   run_name: "phase1_hardmode_1D_data"
+  inp_dim: 1
 
   ## model parameters
   mode: "hard" # "soft" or "hard"

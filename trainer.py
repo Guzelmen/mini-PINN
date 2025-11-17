@@ -71,16 +71,24 @@ def get_warmup_cosine_scheduler(optimizer, warmup_epochs, start_lr, end_lr, min_
         LambdaLR scheduler
     """
     def lr_lambda(epoch):
+        # Handle edge cases
+        if warmup_epochs <= 0:
+            # Pure cosine from epoch 0 to total_epochs
+            cosine_period = max(1, total_epochs)
+            progress = min(max(epoch, 0), cosine_period) / cosine_period
+            return (min_lr / end_lr) + (1.0 - min_lr / end_lr) * (1 + math.cos(math.pi * progress)) / 2
+
         if epoch < warmup_epochs:
             # Linear warmup: from start_lr/end_lr to 1.0
-            warmup_ratio = epoch / warmup_epochs
+            warmup_ratio = epoch / float(warmup_epochs)
             return (start_lr / end_lr) * (1 - warmup_ratio) + 1.0 * warmup_ratio
         else:
             # Cosine decay: from end_lr down to min_lr
             # Progress from 0 to 1 over (total_epochs - warmup_epochs) epochs
             cosine_epoch = epoch - warmup_epochs
-            cosine_period = total_epochs - warmup_epochs
-            progress = cosine_epoch / cosine_period
+            cosine_period = max(1, total_epochs - warmup_epochs)
+            progress = min(max(cosine_epoch, 0), cosine_period) / \
+                float(cosine_period)
             # Cosine annealing: goes from 1.0 to (min_lr/end_lr)
             cosine_multiplier = (min_lr / end_lr) + (1.0 - min_lr /
                                                      end_lr) * (1 + math.cos(math.pi * progress)) / 2
@@ -139,15 +147,16 @@ def trainer(
             f"Unknown lr_type: {lr_type}. Choose from: constant, linear, cos/cosine")
 
     predictions = {}
+    # Ensure first epoch uses start_lr for warmup schedules without stepping scheduler before optimizer
+    if lr_type in ["linear", "cos", "cosine"] and warmup_epochs > 0:
+        optimizer.param_groups[0]["lr"] = start_lr
     for ep in range(1, epochs+1):
         time_start = time.time()
         model.train()
 
-        epoch_inputs = []
+        epoch_x = []
+        epoch_r0 = []
         epoch_outputs = []
-
-        # Get current learning rate (will be updated at end of epoch)
-        current_lr = optimizer.param_groups[0]['lr']
 
         # Training loop
         epoch_losses = {'residual': [], 'bc_1': [], 'bc_2': [], 'total': []}
@@ -161,34 +170,35 @@ def trainer(
             train, desc=f"Epoch {ep}/{epochs}", leave=True, ncols=100)
 
         for batch in train_loader_iter:
-            # Extract x coordinates (first column), r0, Z from batch
-            # Data shape: [batch_size, 3] where columns are [x, r0, Z]
-            batch_data = batch[0]  # Unpack tuple from DataLoader
-            x = batch_data[:, 0:1].clone()  # Extract and clone x coordinates
-            x.requires_grad_(True)  # Enable gradients for differentiation
-            # r0 = batch_data[:, 1:2]  # Not used for PINN
-            # Z = batch_data[:, 2:3]   # Not used for PINN
+            # Extract x coordinates (first column), r0 from batch
+            # Data shape: [batch_size, 2] where columns are [x, r0]
+            inputs = batch[0]  # Unpack tuple from DataLoader
+            # Ensure inputs require gradients for autograd wrt x
+            inputs.requires_grad_(True)
+            x = inputs[:, 0:1].clone()
+            r0 = inputs[:, 1:2].clone()
 
             # Forward pass
-            outputs = model(x)
+            outputs = model(inputs)
 
             if ep % params.save_every == 0:
                 # Detach tensors before saving to avoid gradient tracking issues
-                epoch_inputs.append(x.detach())
+                epoch_x.append(x.detach())
+                epoch_r0.append(r0.detach())
                 epoch_outputs.append(outputs.detach())
 
             # Compute individual losses
             residual_name = f"compute_residual_loss_phase{params.phase}"
             residual_fn = getattr(losses, residual_name)
-            residual_loss = residual_fn(outputs, x)
+            residual_loss = residual_fn(outputs, inputs)
 
             if params.mode == "soft":
                 bc1name = f"compute_bc_loss_1_phase{params.phase}"
                 bc2name = f"compute_bc_loss_2_phase{params.phase}"
                 bc1_fn = getattr(losses, bc1name)
                 bc2_fn = getattr(losses, bc2name)
-                bc_1_loss = bc1_fn(outputs, x)
-                bc_2_loss = bc2_fn(outputs, x)
+                bc_1_loss = bc1_fn(outputs, inputs)
+                bc_2_loss = bc2_fn(outputs, inputs)
             else:
                 bc_1_loss = torch.tensor(0.0, device=outputs.device)
                 bc_2_loss = torch.tensor(0.0, device=outputs.device)
@@ -244,13 +254,15 @@ def trainer(
 
         if ep % params.save_every == 0:
             # Concatenate tensors first, then convert to numpy
-            inputs_all = torch.cat(epoch_inputs, dim=0).cpu().numpy()
+            x_all = torch.cat(epoch_x, dim=0).cpu().numpy()
+            r0_all = torch.cat(epoch_r0, dim=0).cpu().numpy()
             outputs_all = torch.cat(epoch_outputs, dim=0).cpu().numpy()
 
-            predictions[ep] = {"inputs": inputs_all, "outputs": outputs_all}
+            predictions[ep] = {"x": x_all,
+                               "r0": r0_all, "outputs": outputs_all}
 
             print(
-                f"Saved epoch {ep}: {inputs_all.shape=} {outputs_all.shape=}")
+                f"Saved epoch {ep}: {x_all.shape=} {r0_all.shape=} {outputs_all.shape=}")
 
         # Training epoch complete - compute averages before printing
         avg_residual = np.mean(epoch_losses['residual'])
@@ -284,20 +296,37 @@ def trainer(
         # In hard mode, log hard-constraint checks using explicit probes at x=0 and x=1
         checks = {}
         if params.mode == "hard":
-            x0 = torch.tensor([[0.0]], device=next(
-                model.parameters()).device, requires_grad=True)
-            x1 = torch.tensor([[1.0]], device=next(
-                model.parameters()).device, requires_grad=True)
-            psi0 = model(x0)
-            psi1 = model(x1)
-            dpsi1_dx = torch.autograd.grad(
+            device = next(model.parameters()).device
+            # Probe points in x
+            x0 = torch.tensor([[0.0], [1e-4]], device=device,
+                              requires_grad=True)
+            x1 = torch.tensor([[1.0], [1e-4]], device=device,
+                              requires_grad=True)
+            # If model expects 2 inputs [x, r0], pair x with a fixed r0; BCs depend only on x
+            if getattr(params, "inp_dim", 1) == 2:
+                r0_const0 = torch.full(
+                    (x0.size(0), 1), 1e-7, device=device, requires_grad=True)
+                r0_const1 = torch.full(
+                    (x1.size(0), 1), 1e-7, device=device, requires_grad=True)
+                x0_inp = torch.cat([x0, r0_const0], dim=1)
+                x1_inp = torch.cat([x1, r0_const1], dim=1)
+                x0_inp.requires_grad_(True)
+                x1_inp.requires_grad_(True)
+            else:
+                x0_inp = x0
+                x1_inp = x1
+            psi0 = model(x0_inp)
+            psi1 = model(x1_inp)
+            # Compute dpsi/dx by differentiating w.r.t. the same tensor used in the forward pass
+            dpsi1_dx_full = torch.autograd.grad(
                 outputs=psi1,
-                inputs=x1,
+                inputs=x1_inp,
                 grad_outputs=torch.ones_like(psi1),
                 create_graph=False,
                 retain_graph=False,
                 allow_unused=False
             )[0]
+            dpsi1_dx = dpsi1_dx_full[:, 0:1]
             # Convert to scalars for logging
             psi0_err = torch.abs(psi0 - 1.0).mean().item()
             psi1_minus_psiprime1 = torch.abs(psi1 - dpsi1_dx).mean().item()
@@ -337,25 +366,25 @@ def trainer(
             val_losses = {'residual': [], 'bc_1': [], 'bc_2': [], 'total': []}
 
             for batch in val:
-                batch_data = batch[0]
-                x = batch_data[:, 0:1]
-                x.requires_grad_(True)  # Enable gradients for differentiation
+                inputs = batch[0]  # Unpack tuple from DataLoader
+                # Ensure inputs require gradients for derivative-based losses
+                inputs.requires_grad_(True)
 
-                # Forward pass (needs gradients for loss computation)
-                outputs = model(x)
+                # Forward pass
+                outputs = model(inputs)
 
                 # Compute individual losses
                 residual_name = f"compute_residual_loss_phase{params.phase}"
                 residual_fn = getattr(losses, residual_name)
-                residual_loss = residual_fn(outputs, x)
+                residual_loss = residual_fn(outputs, inputs)
 
                 if params.mode == "soft":
                     bc1name = f"compute_bc_loss_1_phase{params.phase}"
                     bc2name = f"compute_bc_loss_2_phase{params.phase}"
                     bc1_fn = getattr(losses, bc1name)
                     bc2_fn = getattr(losses, bc2name)
-                    bc_1_loss = bc1_fn(outputs, x)
-                    bc_2_loss = bc2_fn(outputs, x)
+                    bc_1_loss = bc1_fn(outputs, inputs)
+                    bc_2_loss = bc2_fn(outputs, inputs)
                 else:
                     bc_1_loss = torch.tensor(0.0, device=outputs.device)
                     bc_2_loss = torch.tensor(0.0, device=outputs.device)
@@ -391,7 +420,8 @@ def trainer(
                 "info/epoch_validation_time": time_taken_val
             })
 
-    save_path = f"predictions/{params.run_name}.pkl"
+    d = params.inp_dim
+    save_path = f"predictions/{d}D/{params.run_name}.pkl"
     with open(save_path, "wb") as f:
         pickle.dump(predictions, f)
 

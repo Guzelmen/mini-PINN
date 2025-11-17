@@ -53,6 +53,12 @@ if __name__ == "__main__":
 
     data = load_data(params)
 
+    # If 2-column dataset normalization was used, pass r0 min/max to losses
+    normalizer = data.get('normalizer', None)
+    if isinstance(normalizer, dict) and normalizer.get('type') == 'two_col':
+        import losses as _losses
+        _losses.set_r0_minmax(normalizer['r0_min'], normalizer['r0_max'])
+
     # Create data loaders
 
     data_loaders = get_data_loaders(data, batch_size=params.batch_size)

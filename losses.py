@@ -1,4 +1,24 @@
 import torch
+import math
+
+# constant
+a0 = 5.291772105e-11  # bohr radius in meters
+
+# Globals to invert r0 normalization (minmax [-1,1]) for 2-col datasets
+_R0_MINMAX_SET = False
+_R0_MIN = None
+_R0_MAX = None
+
+
+def set_r0_minmax(r0_min: float, r0_max: float):
+    """
+    Set global r0 min/max used to invert minmax[-1,1] normalization in Phase 2 residual.
+    Call this once after loading data.
+    """
+    global _R0_MINMAX_SET, _R0_MIN, _R0_MAX
+    _R0_MIN = float(r0_min)
+    _R0_MAX = float(r0_max)
+    _R0_MINMAX_SET = True
 
 
 def compute_residual_loss_phase1(outputs, inputs):
@@ -332,21 +352,24 @@ def compute_total_loss_phase1(loss_dict, weighter):
 def compute_residual_loss_phase2(outputs, inputs):
     """
     Nonlinear TF residual for phase 2:
-        psi''(x) = B * x^{-1/2} * [psi(x)]^{3/2}
+        psi''(x) = C * x^{-1/2} * [psi(x)]^{3/2}
 
     Changed to:
-        psi''(x) * x^(1/2) - psi(x)^3/2 = 0
+        psi''(x) * x^(1/2) - C * psi(x)^3/2 = 0
 
-    Defined B as 1, and x not in denominator.
+    C depends on r0, and x not in denominator.
 
     Args:
         outputs: phi(x) predictions, shape [batch, 1] (requires_grad=True)
-        inputs: x coordinates, shape [batch, 1] (requires_grad=True)
+        inputs: x & r0, shape [batch, 2] (requires_grad=True)
 
     Returns:
         residual loss: mean squared residual over the batch
     """
-    x = inputs
+    # Use the same inputs tensor used to compute psi to preserve graph connectivity
+    x = inputs[:, 0:1]
+    r0_col = inputs[:, 1:2]
+
     # Ensure outputs have shape [batch, 1]
     if len(outputs.shape) == 2 and outputs.shape[1] == 1:
         psi = outputs
@@ -355,38 +378,52 @@ def compute_residual_loss_phase2(outputs, inputs):
     else:
         psi = outputs
 
-    # First derivative
-    dpsi_dx_out = torch.autograd.grad(
+    # First derivative: compute grad wrt the full inputs, then take x-component
+    dpsi_dinputs_out = torch.autograd.grad(
         outputs=psi,
-        inputs=x,
+        inputs=inputs,
         grad_outputs=torch.ones_like(psi),
         create_graph=True,
         retain_graph=True,
         only_inputs=True,
         allow_unused=False
     )
-    if len(dpsi_dx_out) == 0 or dpsi_dx_out[0] is None:
+    if len(dpsi_dinputs_out) == 0 or dpsi_dinputs_out[0] is None:
         raise RuntimeError(
             "Phase2: dpsi/dx computation failed; check graph connectivity.")
-    dpsi_dx = dpsi_dx_out[0]
+    dpsi_dx = dpsi_dinputs_out[0][:, 0:1]
 
-    # Second derivative
-    d2psi_dx2_out = torch.autograd.grad(
+    # Second derivative: differentiate dpsi_dx wrt inputs, then take x-component
+    d2psi_dinputs_out = torch.autograd.grad(
         outputs=dpsi_dx,
-        inputs=x,
+        inputs=inputs,
         grad_outputs=torch.ones_like(dpsi_dx),
         create_graph=True,
         retain_graph=True,
         only_inputs=True,
         allow_unused=False
     )
-    if len(d2psi_dx2_out) == 0 or d2psi_dx2_out[0] is None:
+    if len(d2psi_dinputs_out) == 0 or d2psi_dinputs_out[0] is None:
         raise RuntimeError(
             "Phase2: d2psi/dx2 computation failed; check graph connectivity.")
-    d2psi_dx2 = d2psi_dx2_out[0]
+    d2psi_dx2 = d2psi_dinputs_out[0][:, 0:1]
 
-    # not clamping psi to positive for now, let's see how it goes
-    residual = d2psi_dx2 * x**0.5 - psi**1.5
+    # Invert r0 normalization if configured (minmax [-1,1] -> physical)
+    if _R0_MINMAX_SET:
+        r0 = (r0_col + 1.0) * 0.5 * (_R0_MAX - _R0_MIN) + _R0_MIN
+    else:
+        r0 = r0_col
+
+    b = 0.25 * ((9 * (math.pi)**2) / 2)**(1/3) * a0  # constant factor. set Z=1
+    if (r0 < 0).any():
+        print("Watch out: r0 is negative")
+    r0_pos = torch.clamp(r0, min=0.0)
+    c = (r0_pos / b)**(3/2)
+
+    if (psi < 0).any():
+        print("Watch out: psi is negative")
+    psi_clamp = torch.clamp(psi, min=0.0)
+    residual = (d2psi_dx2 * x**0.5) - c * psi_clamp**1.5
     return torch.mean(residual ** 2)
 
 
