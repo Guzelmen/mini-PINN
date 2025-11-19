@@ -1,4 +1,4 @@
-
+import math
 import torch
 from pathlib import Path
 import os
@@ -17,7 +17,8 @@ def set_seed(seed=42):
 def make_x_edge_focused(n_points=200, seed=42):
     """
     Build an edge-focused 1D grid on [0,1] with exactly n_points values.
-    Strategy: mix uniform/global with bands [0,0.2] and [0.8,1], dedupe, pad, and enforce endpoints.
+    Strategy: mix uniform/global with bands [0,0.2] and [0.8,1], dedupe, 
+    pad, and enforce endpoints.
     """
     g = torch.Generator().manual_seed(seed)
     n_total = n_points
@@ -86,7 +87,8 @@ def generate_x_r0_64k(out_path="./data/64k_x_log_r0.pt", seed=42, n_points=64000
     print(f"  x in (0.0001, 0.9999), r0 log-uniform in [1e-9, 1e-5]")
 
 
-def main(out_path="./data/40kgridpoints_logr0_randZ_noendpoints.pt", seed=42, n_points=40000):
+def old_main(out_path="./data/40kgridpoints_logr0_randZ_noendpoints.pt",
+             seed=42, n_points=40000):
     """
     Generate dataset with n_points (default 40k) points.
     - x: evenly spaced grid in [0, 1] (inclusive) with n_points values
@@ -123,5 +125,20 @@ def main(out_path="./data/40kgridpoints_logr0_randZ_noendpoints.pt", seed=42, n_
     print(f"  Z: randomly sampled from {Z_values.shape[0]} values")
 
 
+def generate_phase2_final(out_path="./data/phase_2_final_x_alpha_64k.pt",
+                          seed=42, n_points=64000):
+    torch.manual_seed(seed)
+    x = torch.linspace(0.0, 1.0, steps=n_points).unsqueeze(1)
+    r0 = torch.logspace(math.log10(1e-9), math.log10(1e-5),
+                        steps=n_points).unsqueeze(1)
+    a0 = 5.291772105e-11  # in meters
+    b = 0.25 * (4.5 * math.pi**2)**(1/3) * a0
+    alpha = r0 / b
+    X = torch.cat([x, alpha], dim=1)  # shape [N, 2] = [x, alpha]
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    torch.save(X, out_path)
+    print(f"Saved tensor of shape {tuple(X.shape)} to {out_path}")
+
+
 if __name__ == "__main__":
-    generate_x_r0_64k()
+    generate_phase2_final()

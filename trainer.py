@@ -55,7 +55,8 @@ def get_warmup_linear_scheduler(optimizer, warmup_epochs, start_lr, end_lr):
     return LambdaLR(optimizer, lr_lambda)
 
 
-def get_warmup_cosine_scheduler(optimizer, warmup_epochs, start_lr, end_lr, min_lr, total_epochs):
+def get_warmup_cosine_scheduler(optimizer, warmup_epochs, start_lr,
+                                end_lr, min_lr, total_epochs):
     """
     Create a learning rate scheduler with linear warmup followed by cosine decay.
 
@@ -155,7 +156,7 @@ def trainer(
         model.train()
 
         epoch_x = []
-        epoch_r0 = []
+        epoch_alpha = []
         epoch_outputs = []
 
         # Training loop
@@ -176,7 +177,7 @@ def trainer(
             # Ensure inputs require gradients for autograd wrt x
             inputs.requires_grad_(True)
             x = inputs[:, 0:1].clone()
-            r0 = inputs[:, 1:2].clone()
+            alpha = inputs[:, 1:2].clone()
 
             # Forward pass
             outputs = model(inputs)
@@ -184,13 +185,13 @@ def trainer(
             if ep % params.save_every == 0:
                 # Detach tensors before saving to avoid gradient tracking issues
                 epoch_x.append(x.detach())
-                epoch_r0.append(r0.detach())
+                epoch_alpha.append(alpha.detach())
                 epoch_outputs.append(outputs.detach())
 
             # Compute individual losses
             residual_name = f"compute_residual_loss_phase{params.phase}"
             residual_fn = getattr(losses, residual_name)
-            residual_loss = residual_fn(outputs, inputs)
+            residual_loss = residual_fn(outputs, inputs, params=params)
 
             if params.mode == "soft":
                 bc1name = f"compute_bc_loss_1_phase{params.phase}"
@@ -255,14 +256,14 @@ def trainer(
         if ep % params.save_every == 0:
             # Concatenate tensors first, then convert to numpy
             x_all = torch.cat(epoch_x, dim=0).cpu().numpy()
-            r0_all = torch.cat(epoch_r0, dim=0).cpu().numpy()
+            alpha_all = torch.cat(epoch_alpha, dim=0).cpu().numpy()
             outputs_all = torch.cat(epoch_outputs, dim=0).cpu().numpy()
 
             predictions[ep] = {"x": x_all,
-                               "r0": r0_all, "outputs": outputs_all}
+                               "r0": alpha_all, "outputs": outputs_all}
 
             print(
-                f"Saved epoch {ep}: {x_all.shape=} {r0_all.shape=} {outputs_all.shape=}")
+                f"Saved epoch {ep}: {x_all.shape=} {alpha_all.shape=} {outputs_all.shape=}")
 
         # Training epoch complete - compute averages before printing
         avg_residual = np.mean(epoch_losses['residual'])
@@ -296,38 +297,25 @@ def trainer(
         # In hard mode, log hard-constraint checks using explicit probes at x=0 and x=1
         checks = {}
         if params.mode == "hard":
-            device = next(model.parameters()).device
-            # Probe points in x
-            x0 = torch.tensor([[0.0], [1e-4]], device=device,
-                              requires_grad=True)
-            x1 = torch.tensor([[1.0], [1e-4]], device=device,
-                              requires_grad=True)
-            # If model expects 2 inputs [x, r0], pair x with a fixed r0; BCs depend only on x
-            if getattr(params, "inp_dim", 1) == 2:
-                r0_const0 = torch.full(
-                    (x0.size(0), 1), 1e-7, device=device, requires_grad=True)
-                r0_const1 = torch.full(
-                    (x1.size(0), 1), 1e-7, device=device, requires_grad=True)
-                x0_inp = torch.cat([x0, r0_const0], dim=1)
-                x1_inp = torch.cat([x1, r0_const1], dim=1)
-                x0_inp.requires_grad_(True)
-                x1_inp.requires_grad_(True)
-            else:
-                x0_inp = x0
-                x1_inp = x1
-            psi0 = model(x0_inp)
-            psi1 = model(x1_inp)
+            alpha_check = torch.tensor([[1e3]])
+            x0 = torch.zeros_like(alpha_check)
+            x1 = torch.ones_like(alpha_check)
+
+            inp0 = torch.cat([x0, alpha_check], dim=-1).requires_grad_(True)
+            inp1 = torch.cat([x1, alpha_check], dim=-1).requires_grad_(True)
+            psi0 = model(inp0)
+            psi1 = model(inp1)
             # Compute dpsi/dx by differentiating w.r.t. the same tensor used in the forward pass
             dpsi1_dx_full = torch.autograd.grad(
                 outputs=psi1,
-                inputs=x1_inp,
+                inputs=inp1,
                 grad_outputs=torch.ones_like(psi1),
                 create_graph=False,
                 retain_graph=False,
                 allow_unused=False
             )[0]
             dpsi1_dx = dpsi1_dx_full[:, 0:1]
-            # Convert to scalars for logging
+
             psi0_err = torch.abs(psi0 - 1.0).mean().item()
             psi1_minus_psiprime1 = torch.abs(psi1 - dpsi1_dx).mean().item()
             checks = {
@@ -376,7 +364,7 @@ def trainer(
                 # Compute individual losses
                 residual_name = f"compute_residual_loss_phase{params.phase}"
                 residual_fn = getattr(losses, residual_name)
-                residual_loss = residual_fn(outputs, inputs)
+                residual_loss = residual_fn(outputs, inputs, params=params)
 
                 if params.mode == "soft":
                     bc1name = f"compute_bc_loss_1_phase{params.phase}"
@@ -420,8 +408,7 @@ def trainer(
                 "info/epoch_validation_time": time_taken_val
             })
 
-    d = params.inp_dim
-    save_path = f"predictions/{d}D/{params.run_name}.pkl"
+    save_path = f"{params.pred_dir}/{params.n_vars}D/{params.run_name}.pkl"
     with open(save_path, "wb") as f:
         pickle.dump(predictions, f)
 

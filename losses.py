@@ -1,24 +1,4 @@
 import torch
-import math
-
-# constant
-a0 = 5.291772105e-11  # bohr radius in meters
-
-# Globals to invert r0 normalization (minmax [-1,1]) for 2-col datasets
-_R0_MINMAX_SET = False
-_R0_MIN = None
-_R0_MAX = None
-
-
-def set_r0_minmax(r0_min: float, r0_max: float):
-    """
-    Set global r0 min/max used to invert minmax[-1,1] normalization in Phase 2 residual.
-    Call this once after loading data.
-    """
-    global _R0_MINMAX_SET, _R0_MIN, _R0_MAX
-    _R0_MIN = float(r0_min)
-    _R0_MAX = float(r0_max)
-    _R0_MINMAX_SET = True
 
 
 def compute_residual_loss_phase1(outputs, inputs):
@@ -49,7 +29,8 @@ def compute_residual_loss_phase1(outputs, inputs):
         f = outputs
 
     # Compute x*f(x) - element-wise multiplication (broadcasting handles shapes)
-    # x: [batch_size, 1], f: [batch_size, 1] or [batch_size] -> g: [batch_size, 1] or [batch_size]
+    # x: [batch_size, 1], f: [batch_size, 1] or [batch_size]
+    # -> g: [batch_size, 1] or [batch_size]
     g = f
 
     # Compute first derivative: dg/dx
@@ -92,7 +73,8 @@ def compute_residual_loss_phase1(outputs, inputs):
             "Second derivative (d²g/dx²) computation failed. "
             "This indicates the computational graph is disconnected. "
             "Check: 1) x not detached in model forward(), "
-            "2) model output properly connected to x, 3) first derivative computation succeeded."
+            "2) model output properly connected to x, "
+            "3) first derivative computation succeeded."
         )
     d2g_dx2 = d2g_dx2_outputs[0]
 
@@ -333,7 +315,8 @@ def compute_total_loss_phase1(loss_dict, weighter):
     to ensure stable training.
 
     Args:
-        loss_dict: Dictionary of individual losses ({'residual': tensor, 'bc_1': tensor, 'bc_2': tensor})
+        loss_dict: Dictionary of individual losses 
+        ({'residual': tensor, 'bc_1': tensor, 'bc_2': tensor})
         weighter: LossWeighter instance
 
     Returns:
@@ -349,26 +332,27 @@ def compute_total_loss_phase1(loss_dict, weighter):
 # Phase 2 losses
 # =========================
 
-def compute_residual_loss_phase2(outputs, inputs):
+def compute_residual_loss_phase2(outputs, inputs, params):
     """
     Nonlinear TF residual for phase 2:
         psi''(x) = C * x^{-1/2} * [psi(x)]^{3/2}
 
     Changed to:
-        psi''(x) * x^(1/2) - C * psi(x)^3/2 = 0
+        psi''(x) * x^(1/2) / C - psi(x)^3/2 = 0
 
     C depends on r0, and x not in denominator.
 
     Args:
-        outputs: phi(x) predictions, shape [batch, 1] (requires_grad=True)
-        inputs: x & r0, shape [batch, 2] (requires_grad=True)
+        outputs: psi(x) predictions, shape [batch, 1] (requires_grad=True)
+        inputs: x & alpha, shape [batch, 2] (requires_grad=True)
+        params: configs
 
     Returns:
         residual loss: mean squared residual over the batch
     """
     # Use the same inputs tensor used to compute psi to preserve graph connectivity
     x = inputs[:, 0:1]
-    r0_col = inputs[:, 1:2]
+    alpha = inputs[:, 1:2]
 
     # Ensure outputs have shape [batch, 1]
     if len(outputs.shape) == 2 and outputs.shape[1] == 1:
@@ -408,23 +392,18 @@ def compute_residual_loss_phase2(outputs, inputs):
             "Phase2: d2psi/dx2 computation failed; check graph connectivity.")
     d2psi_dx2 = d2psi_dinputs_out[0][:, 0:1]
 
-    # Invert r0 normalization if configured (minmax [-1,1] -> physical)
-    if _R0_MINMAX_SET:
-        r0 = (r0_col + 1.0) * 0.5 * (_R0_MAX - _R0_MIN) + _R0_MIN
+    if (alpha < 0).any():
+        print("Watch out: alpha (r0/b) is negative")
+    c = alpha ** (3/2)
+
+    residual = (d2psi_dx2 * x**0.5) / c - psi**1.5
+
+    if params.loss_type == "mse":
+        loss = torch.mean(residual**2)
     else:
-        r0 = r0_col
+        raise ValueError("Need to select an appropiate loss type")
 
-    b = 0.25 * ((9 * (math.pi)**2) / 2)**(1/3) * a0  # constant factor. set Z=1
-    if (r0 < 0).any():
-        print("Watch out: r0 is negative")
-    r0_pos = torch.clamp(r0, min=0.0)
-    c = (r0_pos / b)**(3/2)
-
-    if (psi < 0).any():
-        print("Watch out: psi is negative")
-    psi_clamp = torch.clamp(psi, min=0.0)
-    residual = (d2psi_dx2 * x**0.5) - c * psi_clamp**1.5
-    return torch.mean(residual ** 2)
+    return loss
 
 
 def compute_bc_loss_1_phase2(outputs, inputs):

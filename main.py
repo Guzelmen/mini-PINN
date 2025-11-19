@@ -5,6 +5,7 @@ import random
 import models
 from trainer import trainer
 from data_utils.loader import load_data, get_data_loaders
+import eval_predictions as ev
 import torch
 import numpy as np
 import argparse
@@ -53,15 +54,10 @@ if __name__ == "__main__":
 
     data = load_data(params)
 
-    # If 2-column dataset normalization was used, pass r0 min/max to losses
-    normalizer = data.get('normalizer', None)
-    if isinstance(normalizer, dict) and normalizer.get('type') == 'two_col':
-        import losses as _losses
-        _losses.set_r0_minmax(normalizer['r0_min'], normalizer['r0_max'])
-
     # Create data loaders
 
-    data_loaders = get_data_loaders(data, batch_size=params.batch_size)
+    data_loaders = get_data_loaders(data, batch_size=params.batch_size,
+                                    shuffle_train=params.shuffle_train)
 
     train_loader = data_loaders["train"]
     val_loader = data_loaders["val"]
@@ -87,6 +83,9 @@ if __name__ == "__main__":
     if params.stage == "train":
         # train the model
         trainer(model, train_loader, val_loader, params)
+        # pkl_file = f"{params.pred_dir}/{params.n_vars}D/{params.run_name}.pkl"
+        # ev.plot_pred_general(filepath=pkl_file, params=params)
+
     elif params.stage == "test":
         # test the model
         pass

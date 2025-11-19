@@ -4,7 +4,7 @@ from pathlib import Path
 from data_utils.normalisation import fit_and_transform
 
 
-def load_data(params):
+def load_data_and_norm(params):
     """
     Load the pre-generated data from the PyTorch file, normalize it, and split into train/val/test sets.
 
@@ -120,7 +120,73 @@ def load_data(params):
         }
 
 
-def get_data_loaders(data_dict, batch_size, shuffle_train=True):
+def load_data(params):
+    """
+    Load the pre-generated data from the PyTorch file, split into train/val/test sets.
+
+    Args:
+        params (dict): Parameters for the data loading
+
+    Returns:
+        dict: Dictionary containing:
+            - 'train': training data tensor
+            - 'val': validation data tensor  
+            - 'test': test data tensor
+    """
+    # go to parent of this current folder and then into the data folder
+    file_path = Path(__file__).parent.parent / str(params.data_path)
+    file_path = str(file_path)
+    print(f"Data file path: {file_path}")
+
+    # Check if file exists
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"Data file not found at {file_path}")
+
+    # Load the data
+    print(f"Loading data from {file_path}...")
+    raw_data = torch.load(file_path)
+
+    # Extract the X tensor (supports 2 or 3 columns)
+    X = raw_data  # Shape: [N, 2] or [N, 3]
+    print(f"Loaded data shape: {X.shape}")
+
+    # Set random seed for reproducible splits
+    torch.manual_seed(params.random_seed)
+
+    # Define exact split sizes depending on number of columns
+    if X.shape[1] == 2:
+        # New 2-column dataset: [x, alpha], total 64000
+        n_train = 51200  # 100 batches of 512
+        n_val = 6400
+        n_test = 6400
+    else:
+        # Legacy 3-column dataset: [x, r0, Z]
+        n_train = 25600  # 100 batches of 256
+        n_val = 3328     # 13 batches of 256
+        n_test = 3328    # 13 batches of 256
+    n_total = n_train + n_val + n_test
+
+    # Randomly sample from the 40k available points
+    all_indices = torch.randperm(X.shape[0])
+    selected_indices = all_indices[:n_total]
+
+    # Split the selected indices
+    train_indices = selected_indices[:n_train]
+    val_indices = selected_indices[n_train:n_train + n_val]
+    test_indices = selected_indices[n_train + n_val:]
+
+    # Split the data
+    X_train = X[train_indices]
+    X_val = X[val_indices]
+    X_test = X[test_indices]
+
+    print(
+        f"Data split: Train={X_train.shape[0]}, Val={X_val.shape[0]}, Test={X_test.shape[0]}")
+
+    return {"train": X_train, "val": X_val, "test": X_test}
+
+
+def get_data_loaders(data_dict, batch_size, shuffle_train):
     """
     Convert the data dictionary into PyTorch DataLoaders.
 

@@ -195,40 +195,56 @@ class Model_hard_phase2(nn.Module):
         nn.init.zeros_(self.out.weight)
         nn.init.zeros_(self.out.bias)
 
+        norm_mode = params.norm_mode
+        if norm_mode == "standardize":
+            self.register_buffer(
+                "a_mean", torch.tensor(params.standard_mean))
+            self.register_buffer(
+                "a_std",  torch.tensor(params.standard_std))
+        elif norm_mode == "minmax":
+            self.register_buffer(
+                "a_min",  torch.tensor(params.minmax_min))
+            self.register_buffer(
+                "a_max",  torch.tensor(params.minmax_max))
+        else:
+            raise ValueError("mode must be 'standardize' or 'minmax'")
+
+        self.norm_mode = norm_mode
+
+    def scale_alpha(self, alpha):
+        a = torch.log1p(alpha)
+        if self.norm_mode == "standardize":
+            normalised = (a - self.a_mean) / (self.a_std + 1e-8)
+        elif self.norm_mode == "minmax":
+            a_mm = (a - self.a_min) / (self.a_max - self.a_min + 1e-12)
+            normalised = 2.0 * a_mm - 1.0
+        else:
+            normalised = 0
+            print("What the helly")
+
+        return normalised
+
     def forward(self, inputs):
         """
         Args:
-            x: shape N
+            inputs: shape [N, 2]
 
         Returns:
             Psi: shape N
         """
-        # Use the same input tensor used to compute N. Do not clone/detach,
-        # otherwise the gradient path between N and x breaks.
+
         x = inputs[:, 0:1]
-        h = self.act(self.first(inputs))
+        alpha = inputs[:, 1:2]
+        norm_alpha = self.scale_alpha(alpha)
+        norm_inp = torch.cat([x, norm_alpha], dim=-1)
+
+        h = self.act(self.first(norm_inp))
         for layer in self.hiddens:
             h = self.act(layer(h))
         N = self.out(h)
-        # Compute gradients of N with respect to the full inputs (x, r0)
-        # and then select the x-component to obtain dN/dx.
-        N_grad_wrt_inputs = torch.autograd.grad(
-            N, inputs,
-            grad_outputs=torch.ones_like(N),
-            create_graph=True,  # needed if you want higher derivatives later
-            retain_graph=True,  # only needed if you reuse graph, safe to include for now
-            only_inputs=True,   # Only compute gradients w.r.t. x
-            allow_unused=False  # Should not be unused - raise error if disconnected
-        )
 
-        if len(N_grad_wrt_inputs) == 0 or N_grad_wrt_inputs[0] is None:
-            raise RuntimeError(
-                "N_prime computation failed in Model2. "
-                "Check that x is properly connected in the computational graph."
-            )
-        # Take the derivative with respect to x (column 0)
-        N_prime = N_grad_wrt_inputs[0][:, 0:1]
+        w = 0.5 * x**2 + x * (1 - x)**2 * N
 
-        Psi = x**2 + 1 + x*N + x*(1-x)*N_prime
+        Psi = torch.exp(w)
 
         return Psi

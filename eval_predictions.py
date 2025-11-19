@@ -5,7 +5,7 @@ import math
 from scipy.optimize import curve_fit
 
 
-def plot_pred_phase1(filename):
+def plot_pred_phase1(filepath, params):
     """
     Plots the predictions of the model, psi(x) vs x.
     Fits a polynomial to the predictions and plots it.
@@ -18,11 +18,10 @@ def plot_pred_phase1(filename):
             ...
         }
 
-    Returns: big figure with all plots for specific epochs, saved in plots/filename.png.
+    Returns: big figure with all plots for specific epochs, saved in png file
     """
 
-    pkl = f"predictions/{filename}.pkl"
-    with open(pkl, "rb") as f:
+    with open(filepath, "rb") as f:
         data = pickle.load(f)
 
     epochs = list(data.keys())
@@ -76,11 +75,11 @@ def plot_pred_phase1(filename):
         ax.set_visible(False)
 
     fig.tight_layout()
-    fig.savefig(f"plot_predictions/{filename}.png")
+    fig.savefig(f"{params.plot_dir}/{params.n_vars}D/{params.run_name}.png")
     plt.close(fig)
 
 
-def plot_pred_general(filename: str, enable_fit: bool = False):
+def plot_pred_general(filepath: str, params, enable_fit: bool = False):
     """
     General plotting utility:
     - Loads predictions the same way as plot_pred_phase1 (predictions/{filename}.pkl)
@@ -88,8 +87,7 @@ def plot_pred_general(filename: str, enable_fit: bool = False):
     - If enable_fit=False (default): only plots the data points.
       Note: Fitting is currently disabled by request.
     """
-    pkl = f"predictions/{filename}.pkl"
-    with open(pkl, "rb") as f:
+    with open(filepath, "rb") as f:
         data = pickle.load(f)
 
     epochs = list(data.keys())
@@ -101,7 +99,7 @@ def plot_pred_general(filename: str, enable_fit: bool = False):
     axes = axes.flatten()
 
     for ax, e in zip(axes, epochs):
-        inputs = data[e]["inputs"].flatten()
+        inputs = data[e]["x"].flatten()
         outputs = data[e]["outputs"].flatten()
 
         sort_idx = np.argsort(inputs)
@@ -140,20 +138,20 @@ def plot_pred_general(filename: str, enable_fit: bool = False):
             }
 
             best_name = None
-            best_params = None
+            best_coeffs = None
             best_cov = None
             best_curve = None
             best_rss = float("inf")
 
             for name, fn in candidates.items():
-                params, cov, *_ = curve_fit(fn, x, y, maxfev=20000)
-                y_hat = fn(x, *params)
+                coeffs, cov, *_ = curve_fit(fn, x, y, maxfev=20000)
+                y_hat = fn(x, *coeffs)
                 rss = float(np.sum((y - y_hat) ** 2))
                 is_best = False
                 if rss < best_rss:
                     best_rss = rss
                     best_name = name
-                    best_params = params
+                    best_coeffs = coeffs
                     best_cov = cov
                     best_curve = y_hat
                     is_best = True
@@ -161,7 +159,7 @@ def plot_pred_general(filename: str, enable_fit: bool = False):
                 # Debug print for each candidate tried
                 print(
                     f"[fit] candidate={name}, rss={rss:.6g}, "
-                    f"params={np.array2string(params, precision=4, floatmode='fixed')}, "
+                    f"coeffs={np.array2string(coeffs, precision=4, floatmode='fixed')}, "
                     f"stderr={np.array2string(errs_loop, precision=4, floatmode='fixed')}, "
                     f"best={is_best}"
                 )
@@ -175,15 +173,15 @@ def plot_pred_general(filename: str, enable_fit: bool = False):
         legend = ax.legend(loc='best', framealpha=0.9)
 
         if enable_fit is True:
-            if best_curve is not None and best_params is not None and best_cov is not None:
+            if best_curve is not None and best_coeffs is not None and best_cov is not None:
                 errs = np.sqrt(np.clip(np.diag(best_cov), 0.0, None))
                 # Build a readable multi-line label depending on the chosen model
                 if best_name in ("poly2", "poly3", "poly4"):
-                    deg = len(best_params) - 1
+                    deg = len(best_coeffs) - 1
                     # params are [a0, a1, ..., a_deg]; present from highest power to constant
                     terms = []
                     for k in range(deg, -1, -1):
-                        coeff = best_params[k]
+                        coeff = best_coeffs[k]
                         err = errs[k] if k < len(errs) else 0.0
                         if k >= 2:
                             terms.append(
@@ -194,7 +192,7 @@ def plot_pred_general(filename: str, enable_fit: bool = False):
                             terms.append(f"({coeff:.3g} ± {err:.2g})")
                     fit_label_text = "Fit (poly): " + "\n+ ".join(terms)
                 elif best_name == "exp":
-                    a, b, c = best_params
+                    a, b, c = best_coeffs
                     ea, eb, ec = errs[:3]
                     fit_label_text = (
                         "Fit (exp): $a e^{b x} + c$\n"
@@ -203,7 +201,7 @@ def plot_pred_general(filename: str, enable_fit: bool = False):
                         f"c={c:.3g} ± {ec:.2g}"
                     )
                 elif best_name == "stretch_exp":
-                    a, b, c, d = best_params
+                    a, b, c, d = best_coeffs
                     ea, eb, ec, ed = errs[:4]
                     fit_label_text = (
                         "Fit (stretch exp): $a e^{b x^{c}} + d$\n"
@@ -213,7 +211,7 @@ def plot_pred_general(filename: str, enable_fit: bool = False):
                         f"d={d:.3g} ± {ed:.2g}"
                     )
                 elif best_name == "power":
-                    a, b, c = best_params
+                    a, b, c = best_coeffs
                     ea, eb, ec = errs[:3]
                     fit_label_text = (
                         "Fit (power): $a x^{b} + c$\n"
@@ -224,7 +222,7 @@ def plot_pred_general(filename: str, enable_fit: bool = False):
                 else:
                     # Fallback generic listing
                     parts = []
-                    for i, (p, ep) in enumerate(zip(best_params, errs)):
+                    for i, (p, ep) in enumerate(zip(best_coeffs, errs)):
                         parts.append(f"p{i}={p:.3g} ± {ep:.2g}")
                     fit_label_text = "Fit: \n" + "\n".join(parts)
 
@@ -237,19 +235,19 @@ def plot_pred_general(filename: str, enable_fit: bool = False):
         ax.set_visible(False)
 
     fig.tight_layout()
-    fig.savefig(f"plot_predictions/{filename}.png")
+    fig.savefig(f"{params.plot_dir}/{params.n_vars}D/{params.run_name}.png")
     plt.close(fig)
 
 
-def plot_pred_specific(filename: str, func: str):
+def plot_pred_specific(filepath: str, func: str, params):
     """
     Fit and plot a specific function over model predictions.
     - filename: same as other plotters (without extension), loads predictions/{filename}.pkl
     - func: one of {"poly2","poly3","poly4","exp","stretch_exp","power"}
-    Saves to plot_predictions/{filename}_{func}.png
+    Saves to png file
     """
-    pkl = f"predictions/{filename}.pkl"
-    with open(pkl, "rb") as f:
+
+    with open(filepath, "rb") as f:
         data = pickle.load(f)
 
     epochs = list(data.keys())
@@ -294,11 +292,11 @@ def plot_pred_specific(filename: str, func: str):
 
     chosen_fn = mapping[func]
 
-    best_params = None
+    best_coeffs = None
     best_cov = None
 
     for ax, e in zip(axes, epochs):
-        inputs = data[e]["inputs"].flatten()
+        inputs = data[e]["x"].flatten()
         outputs = data[e]["outputs"].flatten()
 
         sort_idx = np.argsort(inputs)
@@ -307,12 +305,12 @@ def plot_pred_specific(filename: str, func: str):
 
         ax.plot(x, y, '+', color="black", label='Model Predictions')
 
-        params, cov, *_ = curve_fit(chosen_fn, x, y, maxfev=20000)
-        y_hat = chosen_fn(x, *params)
+        coeffs, cov, *_ = curve_fit(chosen_fn, x, y, maxfev=20000)
+        y_hat = chosen_fn(x, *coeffs)
         ax.plot(x, y_hat, color="red", label='Fit')
 
         # Store last params/cov for legend formatting; legend shows for each subplot anyway
-        best_params = params
+        best_coeffs = coeffs
         best_cov = cov
 
         ax.set_xlabel('x')
@@ -321,13 +319,13 @@ def plot_pred_specific(filename: str, func: str):
         legend = ax.legend(loc='best', framealpha=0.9)
 
         # Legend details with parameter uncertainties
-        if best_params is not None and best_cov is not None:
+        if best_coeffs is not None and best_cov is not None:
             errs = np.sqrt(np.clip(np.diag(best_cov), 0.0, None))
             if func in ("poly2", "poly3", "poly4"):
-                deg = len(best_params) - 1
+                deg = len(best_coeffs) - 1
                 terms = []
                 for k in range(deg, -1, -1):
-                    coeff = best_params[k]
+                    coeff = best_coeffs[k]
                     err = errs[k] if k < len(errs) else 0.0
                     if k >= 2:
                         terms.append(f"({coeff:.3g} ± {err:.2g}) $x^{{{k}}}$")
@@ -337,7 +335,7 @@ def plot_pred_specific(filename: str, func: str):
                         terms.append(f"({coeff:.3g} ± {err:.2g})")
                 fit_label_text = f"Fit ({func}): " + "\n+ ".join(terms)
             elif func == "exp":
-                a, b, c = best_params
+                a, b, c = best_coeffs
                 ea, eb, ec = errs[:3]
                 fit_label_text = (
                     "Fit (exp): $a e^{b x} + c$\n"
@@ -346,7 +344,7 @@ def plot_pred_specific(filename: str, func: str):
                     f"c={c:.3g} ± {ec:.2g}"
                 )
             elif func == "stretch_exp":
-                a, b, c, d = best_params
+                a, b, c, d = best_coeffs
                 ea, eb, ec, ed = errs[:4]
                 fit_label_text = (
                     "Fit (stretch exp): $a e^{b x^{c}} + d$\n"
@@ -356,7 +354,7 @@ def plot_pred_specific(filename: str, func: str):
                     f"d={d:.3g} ± {ed:.2g}"
                 )
             elif func == "power":
-                a, b, c = best_params
+                a, b, c = best_coeffs
                 ea, eb, ec = errs[:3]
                 fit_label_text = (
                     "Fit (power): $a x^{b} + c$\n"
@@ -366,7 +364,7 @@ def plot_pred_specific(filename: str, func: str):
                 )
             else:
                 parts = []
-                for i, (p, ep) in enumerate(zip(best_params, errs)):
+                for i, (p, ep) in enumerate(zip(best_coeffs, errs)):
                     parts.append(f"p{i}={p:.3g} ± {ep:.2g}")
                 fit_label_text = f"Fit ({func}): \n" + "\n".join(parts)
 
@@ -378,21 +376,22 @@ def plot_pred_specific(filename: str, func: str):
         ax.set_visible(False)
 
     fig.tight_layout()
-    fig.savefig(f"plot_predictions/{filename}_{func}.png")
+    fig.savefig(
+        f"{params.plot_dir}/{params.n_vars}D/{params.run_name}_{func}.png")
     plt.close(fig)
 
 
-def plot_pred_fmt_power(filename: str, number=3):
+def plot_pred_fmt_power(filepath: str, params, number=3):
     """
     Fit and plot a specific function over model predictions.
     - filename: same as other plotters (without extension), loads predictions/{filename}.pkl
     - number: number of coefficients in the Feynman-Metropolis-Teller power series 
               approximation to do, default is 3.
 
-    Saves to plot_predictions/{filename}_fmt_power.png
+    Saves to png file
     """
-    pkl = f"predictions/{filename}.pkl"
-    with open(pkl, "rb") as f:
+
+    with open(filepath, "rb") as f:
         data = pickle.load(f)
 
     epochs = list(data.keys())
@@ -423,11 +422,11 @@ def plot_pred_fmt_power(filename: str, number=3):
 
         return y
 
-    best_params = None
+    best_coeffs = None
     best_cov = None
 
     for ax, e in zip(axes, epochs):
-        inputs = data[e]["inputs"].flatten()
+        inputs = data[e]["x"].flatten()
         outputs = data[e]["outputs"].flatten()
 
         sort_idx = np.argsort(inputs)
@@ -436,12 +435,12 @@ def plot_pred_fmt_power(filename: str, number=3):
 
         ax.plot(x, y, '+', color="black", ms=0.5, label='Model Predictions')
 
-        params, cov, *_ = curve_fit(series, x, y, maxfev=20000)
-        y_hat = series(x, *params)
-        # ax.plot(x, y_hat, color="red", label='Fit')
+        coeffs, cov, *_ = curve_fit(series, x, y, maxfev=20000)
+        y_hat = series(x, *coeffs)
+        ax.plot(x, y_hat, color="red", label='Fit')
 
         # Store last params/cov for legend formatting; legend shows for each subplot anyway
-        best_params = params
+        best_coeffs = coeffs
         best_cov = cov
 
         ax.set_xlabel('x')
@@ -450,9 +449,9 @@ def plot_pred_fmt_power(filename: str, number=3):
         # legend = ax.legend(loc='best', framealpha=0.9)
 
         # Legend details with parameter uncertainties
-        if best_params is not None and best_cov is not None:
+        if best_coeffs is not None and best_cov is not None:
             # a2 and its standard error
-            a2 = float(best_params[0])
+            a2 = float(best_coeffs[0])
             coeff_exp = np.array([
                 [a2, 1],
                 [4/3, 1.5],
@@ -493,10 +492,46 @@ def plot_pred_fmt_power(filename: str, number=3):
         ax.set_visible(False)
 
     fig.tight_layout()
-    fig.savefig(f"plot_predictions/{filename}_fmt_power_deg{k}.png")
+    fig.savefig(
+        f"{params.plot_dir}/{params.n_vars}D/{params.run_name}_fmt_power_deg{k}.png")
+    plt.close(fig)
+
+
+def simple_plot():
+    file = "predictions/2D/shouldwork_phase2_20ep.pkl"
+    with open(file, "rb") as f:
+        data = pickle.load(f)
+
+    print(data.keys())
+    epochs = list(data.keys())
+    n_epochs = len(epochs)
+    cols = math.ceil(math.sqrt(n_epochs * 1.5))
+    rows = math.ceil(n_epochs / cols)
+
+    fig, axes = plt.subplots(rows, cols, figsize=(cols * 4, rows * 3))
+    axes = axes.flatten()
+
+    for ax, e in zip(axes, epochs):
+        inputs = data[e]["r0"].flatten()
+        outputs = data[e]["outputs"].flatten()
+
+        sort_idx = np.argsort(inputs)
+        x = inputs[sort_idx]
+        y = outputs[sort_idx]
+
+        ax.plot(x, y, '+', color="black", label='Model Predictions')
+        ax.set_xlabel('x')
+        ax.set_ylabel(r'$\psi(x)$')
+        ax.set_title(f"Epoch: {e}")
+        legend = ax.legend(loc='best', framealpha=0.9)
+
+    for ax in axes[len(epochs):]:
+        ax.set_visible(False)
+
+    fig.tight_layout()
+    fig.savefig("plot_predictions/2D/shouldwork_phase2_20ep_alpha.png")
     plt.close(fig)
 
 
 if __name__ == "__main__":
-    # remember to change name each time, might want to automate it somehow
-    plot_pred_fmt_power("phase2_hardmode_deeper_1000ep", number=13)
+    simple_plot()

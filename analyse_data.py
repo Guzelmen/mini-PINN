@@ -29,7 +29,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    pt_path = f"data/{args.path}"
+    pt_path = f"data/{args.path}.pt"
     if not os.path.exists(pt_path):
         print(f"Error: file not found: {pt_path}")
         sys.exit(1)
