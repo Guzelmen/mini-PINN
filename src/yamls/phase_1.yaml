@@ -1,0 +1,48 @@
+###############
+# Config for the parameters for training, model, data, etc.
+###############
+
+base_config: &BASE_CONFIG
+    ## parameters
+  random_seed: 42
+
+  phase: 1
+  run_name: "phase1_hardmode_1D_data"
+  inp_dim: 1
+
+  ## model parameters
+  mode: "hard" # "soft" or "hard"
+  nlayers: 4
+  hidden: 32
+  activation: "SiLU" # SiLU, ReLU, Identity, SIREN, GELU
+  w0: 30
+
+
+  ## wandb parameters
+  wandb_group: "phase_1"
+  wandb_project: "mini_pinn"
+  wandb_entity: "guzelmen_msci_project"
+
+
+  ## optimizer parameters
+  lr_type: "constant" # constant, linear, linear with cosine decay...
+  constant_lr: 1e-4
+  start_lr: 1e-5
+  end_lr: 1e-3
+  lr_warmup_epochs: 50
+  min_lr: 1e-5  # Minimum LR for cosine decay
+
+  ## loss parameters
+  loss_strategy: "adaptive" # "fixed" or "adaptive"
+  relative_weights: {"residual": 1.0, "bc_1": 1.0, "bc_2": 1.0}
+
+  ## data parameters
+  data_path: "data/40kgridpoints_logr0_randZ_noendpoints.pt"
+  batch_size: 256
+
+  ## training parameters
+  stage: "train"
+  epochs: 50
+  save_every: 10
+  weights_directory: "weights"
+  

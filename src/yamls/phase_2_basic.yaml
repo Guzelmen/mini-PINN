@@ -1,0 +1,60 @@
+###############
+# Config for the parameters for training, model, data, etc.
+###############
+
+base_config: &BASE_CONFIG
+    ## parameters
+  random_seed: 42
+
+  phase: 2
+  run_name: "newtransform_10ep"
+  n_vars: 2
+
+  ## model parameters
+  mode: "hard" # "soft" or "hard"
+  inp_dim: 2
+  nlayers: 6
+  hidden: 32
+  activation: "SiLU" # SiLU, ReLU, Identity, SIREN, GELU
+  w0: 30
+
+  ## normalisation
+  norm_mode: "minmax"   # minmax or standardasize
+  standard_mean: 0.0
+  standard_std: 1.0
+  minmax_min: -1.0
+  minmax_max: 1.0
+
+  ## wandb parameters
+  wandb_group: "phase2_newcorrect"
+  wandb_project: "mini_pinn"
+  wandb_entity: "guzelmen_msci_project"
+
+  ## optimizer parameters
+  lr_type: "cosine" # constant, linear, linear with cosine decay...
+  constant_lr: 1e-4
+  start_lr: 1e-5
+  end_lr: 5e-4
+  lr_warmup_epochs: 100
+  min_lr: 1e-5  # Minimum LR for cosine decay
+
+  ## loss parameters
+  loss_type: "mse" # might need to rethink if magnitude issues
+  loss_strategy: "adaptive" # "fixed" or "adaptive"
+  relative_weights: {"residual": 1.0, "bc_1": 1.0, "bc_2": 1.0}
+
+  ## data parameters
+  data_path: "data/phase_2_final_x_alpha_64k.pt"
+  batch_size: 512
+  shuffle_train: True
+
+  ## training parameters
+  stage: "train"
+  epochs: 10
+  save_every: 2
+
+  # saving
+  weights_dir: "weights"
+  pred_dir: "predictions"
+  plot_dir: "plot_predictions"
+  
