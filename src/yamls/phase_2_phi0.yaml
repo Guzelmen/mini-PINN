@@ -7,8 +7,9 @@ base_config: &BASE_CONFIG
   random_seed: 42
 
   phase: 2
-  run_name: "standardizing_correctfmt"
+  run_name: "addingphi0_training"
   n_vars: 2
+  debug_mode: False
 
   ## model parameters
   mode: "hard" # "soft" or "hard"
@@ -17,6 +18,8 @@ base_config: &BASE_CONFIG
   hidden: 32
   activation: "SiLU" # SiLU, ReLU, Identity, SIREN, GELU
   w0: 30
+  add_phi0: True
+  k_val: 10
 
   ## normalisation
   norm_mode: "standardize"   # minmax or standardize
@@ -40,7 +43,7 @@ base_config: &BASE_CONFIG
 
   ## loss parameters
   loss_type: "mse" # might need to rethink if magnitude issues
-  fmt_help: true
+  fmt_help: False
   loss_strategy: "fixed" # "fixed" or "adaptive"
   fmt_weights: {"residual": 1.0, "fmt": 1.0}
   cancel_c: False  # keep C factor in PDE (do not cancel)
@@ -52,13 +55,13 @@ base_config: &BASE_CONFIG
 
   ## training parameters
   stage: "train"
-  epochs: 50
-  save_every: 10
+  epochs: 500
+  save_every: 25
 
   # saving
-  plot_auto: True
+  plot_auto: False
   save_weights: True
-  save_weights_every: 25
+  save_weights_every: 100
   pred_dir: "predictions"
   plot_dir: "plot_predictions"
   

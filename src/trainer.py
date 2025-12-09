@@ -6,10 +6,10 @@ import torch
 from torch.optim import Adam
 from torch.optim.lr_scheduler import LambdaLR
 import math
-from utils import sec_deriv_auto, first_deriv_auto, PROJECT_ROOT
+from .utils import sec_deriv_auto, first_deriv_auto, PROJECT_ROOT
 
 import time
-import losses
+from . import losses
 from tqdm import tqdm
 import wandb
 import pickle
@@ -180,6 +180,10 @@ def trainer(
             # Extract x coordinates (first column), r0 from batch
             # Data shape: [batch_size, 2] where columns are [x, r0]
             inputs = batch[0]  # Unpack tuple from DataLoader
+            
+            # Clamp x to avoid singularity at x=0 (d2/dx2 of x^1.5 is infinite at 0)
+            inputs[:, 0].clamp_(min=1e-6)
+
             # Ensure inputs require gradients for autograd wrt x
             inputs.requires_grad_(True)
             x = inputs[:, 0:1].clone()
@@ -246,6 +250,21 @@ def trainer(
             # Backpropagation
             optimizer.zero_grad()
             total_loss.backward()
+
+            # Inspect gradients before clipping
+            total_grad_norm_before = 0.0
+            for p in model.parameters():
+                if p.grad is not None:
+                    param_norm = p.grad.detach().data.norm(2)
+                    total_grad_norm_before += param_norm.item() ** 2
+            total_grad_norm_before = total_grad_norm_before ** 0.5
+            
+            # Print if gradient is massive or nan
+            if total_grad_norm_before > 100 or math.isnan(total_grad_norm_before) and params.debug_mode is True:
+                print(f"[Batch {train_loader_iter.n}] Gradient Norm ALERT: {total_grad_norm_before:.4e}")
+
+            # Clip gradients to prevent explosion
+            # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
             # Record gradient norm before stepping
             total_grad_sq = 0.0
@@ -328,7 +347,7 @@ def trainer(
 
         # In hard mode, log hard-constraint checks using explicit probes at x=0 and x=1
         checks = {}
-        if params.mode == "hard" and ep % (epochs // 10) == 0:
+        if params.mode == "hard" and ep % 10 == 0:
             alpha_check = torch.tensor([[1e3]])
             x0 = torch.zeros_like(alpha_check)
             x1 = torch.ones_like(alpha_check)
@@ -447,14 +466,25 @@ def trainer(
                 "info/epoch_validation_time": time_taken_val
             })
 
-    save_path = PROJECT_ROOT / params.pred_dir / f"{params.n_vars}D" / f"{params.run_name}.pkl"
+        # Periodically save model weights
+        save_weights_every = getattr(params, "save_weights_every", None)
+        save_weights = getattr(params, "save_weights", False)
+        if save_weights is True and isinstance(save_weights_every, int) and save_weights_every > 0 and ep % save_weights_every == 0:
+            weights_dir = PROJECT_ROOT / "saving_weights" / f"{params.run_name}"
+            weights_dir.mkdir(parents=True, exist_ok=True)
+            ckpt_path = weights_dir / f"weights_epoch_{ep}"
+            torch.save(model.state_dict(), ckpt_path)
+            print(f"Saved weights checkpoint to {ckpt_path}")
+
+    if len(predictions) != 0:
+        save_path = PROJECT_ROOT / params.pred_dir / f"{params.n_vars}D" / f"{params.run_name}.pkl"
     
-    # Ensure directory exists
-    save_path.parent.mkdir(parents=True, exist_ok=True)
+        # Ensure directory exists
+        save_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with open(save_path, "wb") as f:
-        pickle.dump(predictions, f)
+        with open(save_path, "wb") as f:
+            pickle.dump(predictions, f)
 
-    print(f"Saved predictions for all selected epochs to {save_path}")
+        print(f"Saved predictions for all selected epochs to {save_path}")
 
     return

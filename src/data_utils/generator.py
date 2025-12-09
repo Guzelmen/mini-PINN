@@ -2,11 +2,7 @@ import math
 import torch
 from pathlib import Path
 import os
-import sys
-
-# Add src to sys.path to ensure utils can be imported
-sys.path.append(str(Path(__file__).resolve().parent.parent))
-from utils import PROJECT_ROOT
+from ..utils import PROJECT_ROOT
 os.environ["MKL_THREADING_LAYER"] = "GNU"
 os.environ["OMP_NUM_THREADS"] = "1"
 

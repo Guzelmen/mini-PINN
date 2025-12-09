@@ -4,6 +4,7 @@ This file contains the model architecture for the small PINN.
 import torch
 import torch.nn as nn
 import math
+from .utils import first_deriv_auto, sec_deriv_auto, phi_w_transform, phi_0_transform
 
 
 class Siren(nn.Module):
@@ -166,8 +167,9 @@ class Model_hard_phase2(nn.Module):
         layers = params.nlayers
         w0 = params.w0
         activation = params.activation
+        self.k_val = params.k_val
+        self.add_phi0 = params.add_phi0
 
-        # Direct inputs: x, r0
         in_dim = 2
         self.first = nn.Linear(in_dim, hidden)
         self.hiddens = nn.ModuleList(
@@ -197,10 +199,19 @@ class Model_hard_phase2(nn.Module):
 
         norm_mode = params.norm_mode
         if norm_mode == "standardize":
-            self.register_buffer(
-                "a_mean", torch.tensor(params.standard_mean))
-            self.register_buffer(
-                "a_std",  torch.tensor(params.standard_std))
+            std_mean = getattr(params, "standard_mean", None)
+            std_std = getattr(params, "standard_std", None)
+            # If not provided, will be estimated online in scale_alpha during training
+            init_mean = torch.tensor(0.0) if std_mean is None else torch.tensor(float(std_mean))
+            init_std  = torch.tensor(1.0) if std_std  is None else torch.tensor(float(std_std))
+            self.register_buffer("a_mean", init_mean)
+            self.register_buffer("a_std",  init_std)
+            # Online running stats (Welford) updated in training mode
+            self.register_buffer("running_mean", torch.tensor(0.0))
+            self.register_buffer("running_var", torch.tensor(1.0))
+            self.register_buffer("running_count", torch.tensor(0.0))
+            # Flag to indicate if stats have been fitted at least once
+            self.register_buffer("norm_fitted", torch.tensor(0, dtype=torch.int64))
         elif norm_mode == "minmax":
             self.register_buffer(
                 "a_min",  torch.tensor(params.minmax_min))
@@ -210,9 +221,12 @@ class Model_hard_phase2(nn.Module):
             raise ValueError("mode must be 'standardize' or 'minmax'")
 
         self.norm_mode = norm_mode
+        self.debug_mode = getattr(params, "debug_mode", False)
+        self.params = params
 
     def scale_alpha(self, alpha):
         a = torch.log1p(alpha)
+
         if self.norm_mode == "standardize":
             normalised = (a - self.a_mean) / (self.a_std + 1e-8)
         elif self.norm_mode == "minmax":
@@ -220,7 +234,7 @@ class Model_hard_phase2(nn.Module):
             normalised = 2.0 * a_mm - 1.0
         else:
             normalised = 0
-            print("What the helly")
+            print("Not correct norm mode")
 
         return normalised
 
@@ -243,25 +257,24 @@ class Model_hard_phase2(nn.Module):
             h = self.act(layer(h))
         N = self.out(h)
 
-        N_prime_outputs = torch.autograd.grad(
-            N, norm_inp,
-            grad_outputs=torch.ones_like(N),
-            create_graph=True,  # needed if you want higher derivatives later
-            retain_graph=True,  # only needed if you reuse graph, safe to include for now
-            only_inputs=True,   # Only compute gradients w.r.t. x
-            allow_unused=False  # Should not be unused - raise error if disconnected
-        )
+        N_prime = first_deriv_auto(N, norm_inp, var1=0)
 
-        if len(N_prime_outputs) == 0 or N_prime_outputs[0] is None:
-            raise RuntimeError(
-                "N_prime computation failed in Model2. "
-                "Check that x is properly connected in the computational graph."
-            )
-        N_prime = N_prime_outputs[0][:, 0:1]
+        #debugging
+        if self.debug_mode is True:
+            print(f"[During fwd] network output before transform (N) -> Min: {N.min().item()}, Max: {N.max().item()}")
+            print(f"[During fwd] N_prime (dN/dnorm_inp, then take wrt x) -> Min: {N_prime.min().item()}, Max: {N_prime.max().item()}")
+        
+        Phi = phi_w_transform(x=x, N=N, N_prime=N_prime, params=self.params)
+        if self.debug_mode is True:
+            print(f"[During fwd] phi (exp(w)) -> Min: {Phi.min().item()}, Max: {Phi.max().item()}")
+        if (Phi < 0).any() and self.debug_mode is True:
+            print("[During fwd] Watch out: phi (exp(w)) is negative.")
 
-        #w = 0.5 * x**2 + x * (1 - x)**2 * N
-        w = 0.5 * x**2 + x * (2 - x) * N + x * (1 - x) * N_prime
+        if self.add_phi0:
+            Phi_0 = phi_0_transform(x=x, alpha=alpha, k=self.k_val)
+            #print(f"[During fwd] phi_0 -> Min: {Phi_0.min().item()}, Max: {Phi_0.max().item()}")
+            if (Phi_0 < 0).any() and self.debug_mode is True:
+                print("[During fwd] Watch out: phi_0 is negative.")
+            Phi = Phi + Phi_0
 
-        Psi = torch.exp(w)
-
-        return Psi
+        return Phi

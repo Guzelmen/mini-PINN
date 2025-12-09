@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 import pickle
 import math
 from scipy.optimize import curve_fit
-from utils import PROJECT_ROOT
+from .utils import PROJECT_ROOT
 
 
 def plot_pred_phase1(filepath, params):
@@ -603,5 +603,48 @@ def plot_pred_only(filepath: str, params, enable_fit: bool = False):
     plt.close(fig)
 
 
+def simple_log_plot():
+    filepath = PROJECT_ROOT / "predictions/2D/standardizing.pkl"
+    with open(filepath, "rb") as f:
+        data = pickle.load(f)
+
+    epochs = list(data.keys())
+    n_epochs = len(epochs)
+    cols = math.ceil(math.sqrt(n_epochs * 1.5))
+    rows = math.ceil(n_epochs / cols)
+
+    fig, axes = plt.subplots(rows, cols, figsize=(cols * 4, rows * 3))
+    axes = axes.flatten()
+
+    for ax, e in zip(axes, epochs):
+        x_vals = data[e]["x"].flatten()
+        outputs = data[e]["outputs"].flatten()
+
+        sort_idx = np.argsort(x_vals)
+        x = x_vals[sort_idx]
+        y1 = outputs[sort_idx]
+
+        # Log-log plot: both axes on logarithmic scale
+        ax.set_xscale('log')
+        ax.set_yscale('log')
+        ax.set_xlim(1e-4, 1.0)
+        ax.plot(x, y1, '+', color="red", ms=0.5, label=r'$\psi(x)$')
+
+        ax.set_xlabel('x (log scale)')
+        ax.set_ylabel(r'$\psi(x)$ (log scale)')
+        ax.set_title(f"Epoch: {e}")
+        legend = ax.legend(loc='best', framealpha=0.9)
+
+    for ax in axes[len(epochs):]:
+        ax.set_visible(False)
+
+    fig.tight_layout()
+    plt.show()
+    save_path = PROJECT_ROOT / "plot_predictions/2D/standardizing_log.png"
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(save_path)
+    plt.close(fig)
+
+
 if __name__ == "__main__":
-    simple_plot()
+    simple_log_plot()

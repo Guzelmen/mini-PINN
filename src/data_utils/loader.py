@@ -1,8 +1,8 @@
 import torch
 import os
 from pathlib import Path
-from data_utils.normalisation import fit_and_transform
-from utils import PROJECT_ROOT
+from .normalisation import fit_and_transform
+from ..utils import PROJECT_ROOT
 
 
 def load_data_and_norm(params):

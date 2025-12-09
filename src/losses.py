@@ -1,5 +1,5 @@
 import torch
-from utils import sec_deriv_auto, first_deriv_auto, fmt_series
+from .utils import sec_deriv_auto, first_deriv_auto, fmt_series
 import math
 
 
@@ -356,7 +356,7 @@ def compute_residual_loss_phase2(outputs, inputs, params):
     x = inputs[:, 0:1]
     alpha = inputs[:, 1:2]
 
-    d2psi_dx2 = sec_deriv_auto(outputs, inputs)
+    d2phi_dx2 = sec_deriv_auto(outputs, inputs, var1=0, var2=0)
 
     if (alpha < 0).any():
         print("Watch out: alpha (r0/b) is negative")
@@ -364,21 +364,26 @@ def compute_residual_loss_phase2(outputs, inputs, params):
 
     # Model output is psi(x)
     if len(outputs.shape) == 2 and outputs.shape[1] == 1:
-        psi = outputs
+        phi = outputs
     elif len(outputs.shape) == 1:
-        psi = outputs.unsqueeze(1)
+        phi = outputs.unsqueeze(1)
     else:
-        psi = outputs
+        phi = outputs
+    
+    #print(f"[During loss] phi -> Min: {phi.min().item()}, Max: {phi.max().item()}")
+    if (phi < 0).any() and params.debug_mode is True:
+        print("[During loss] Watch out: phi (exp(w) + phi0) is negative.")
 
     # Optionally cancel the 1/c factor if requested via params.cancel_c
     cancel_c = getattr(params, "cancel_c", False)
     if cancel_c:
-        residual = (d2psi_dx2 * x**0.5) - psi**1.5
+        residual = (d2phi_dx2 * x**0.5) - phi**1.5
     else:
-        residual = (d2psi_dx2 * x**0.5) / c - psi**1.5
+        residual = (d2phi_dx2 * x**0.5) / c - phi**1.5
 
     if params.loss_type == "mse":
-        loss = torch.mean(residual**2)
+        res = (residual**2)
+        loss = torch.mean(res)
     else:
         raise ValueError("Need to select an appropiate loss type")
 
@@ -482,7 +487,10 @@ def compute_total_loss_phase2(loss_dict, weighter):
 def compute_fmt_loss_phase2(model, inputs, outputs, params):
     """
     Compute the FMT helper loss:
-        FMT_loss = MSE( fmt_series(x, a2) - psi(x) )
+        FMT_loss = MSE( fmt_series(alpha * x, a2) - psi(x) )
+    with a hard spatial filter over x:
+        filter(x) = 1 for x in [0, 0.1], and 0 otherwise.
+    We implement this by masking the per-sample squared errors before averaging.
     where a2 is the initial slope d psi / d x at x = 0 for the same alpha.
     Args:
         model: the PINN model
@@ -502,7 +510,8 @@ def compute_fmt_loss_phase2(model, inputs, outputs, params):
     a2 = a2/alpha
 
     # Compute helper target psi_fmt at current x using per-sample a2
-    psi_fmt = fmt_series(alpha*x_batch, a2)
+    # fmt_series uses z = alpha * x internally when alpha is provided
+    psi_fmt = fmt_series(x_batch, a2, alpha=alpha)
 
     # Align shapes for subtraction
     if outputs.ndim == 1:
@@ -510,11 +519,10 @@ def compute_fmt_loss_phase2(model, inputs, outputs, params):
     else:
         psi = outputs
 
-    residual_fmt = psi_fmt - psi
-    lossfmt = torch.mean(residual_fmt ** 2)
-    #def filterfunc(x):
-    #    y = 0.5 * (torch.tanh((0.5 - x)/0.1) + 1)
-    #    return y
-    #filter = filterfunc(x_batch*alpha)
-    #filter_scalar = torch.mean(filter)
-    return lossfmt * filter_scalar
+    # Per-sample squared error
+    se = (psi_fmt - psi) ** 2
+    # Hard filter: 1 for x in [0, 0.1], 0 otherwise
+    mask = ((x_batch >= 0.0) & (x_batch <= 0.1)).float()
+    # Apply mask then average across the batch
+    lossfmt = torch.mean(se * mask)
+    return lossfmt

@@ -2,16 +2,16 @@
 Will run training and inference from here.
 """
 import random
-import models
-from trainer import trainer
-from data_utils.loader import load_data, get_data_loaders
-import eval_predictions as ev
+from . import models
+from .trainer import trainer
+from .data_utils.loader import load_data, get_data_loaders
+from . import eval_predictions as ev
 import torch
 import numpy as np
 import argparse
 import wandb
-from YParams import YParams
-from utils import PROJECT_ROOT
+from .YParams import YParams
+from .utils import PROJECT_ROOT
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
 
@@ -56,6 +56,26 @@ if __name__ == "__main__":
 
     data = load_data(params)
 
+    # Compute global normalization stats on log1p(alpha) across the loaded dataset,
+    # before batching, and store on params for the model to use.
+    try:
+        if int(params.phase) == 2 and str(params.mode).strip() == "hard":
+            X_all = None
+            if isinstance(data, dict) and all(k in data for k in ("train", "val", "test")):
+                X_all = torch.cat([data["train"], data["val"], data["test"]], dim=0)
+            else:
+                # Fallback if loader structure changes
+                X_all = data["train"]
+            log_alpha = torch.log1p(X_all[:, 1:2])
+            a_mean = float(log_alpha.mean().item())
+            a_std = float(log_alpha.std(unbiased=False).item())
+            params.norm_mode = "standardize"
+            params.standard_mean = a_mean
+            params.standard_std = a_std
+            print(f"[norm] Global standardize log1p(alpha): mean={a_mean:.6g}, std={a_std:.6g}")
+    except Exception as e:
+        print(f"[norm] Warning: failed to compute global mean/std for log1p(alpha): {e}")
+
     # Create data loaders
 
     data_loaders = get_data_loaders(data, batch_size=params.batch_size,
@@ -87,7 +107,8 @@ if __name__ == "__main__":
         trainer(model, train_loader, val_loader, params)
         # plot predictions
         pkl_file = PROJECT_ROOT / params.pred_dir / f"{params.n_vars}D" / f"{params.run_name}.pkl"
-        ev.plot_pred_only(filepath=pkl_file, params=params)
+        if params.plot_auto:
+            ev.plot_pred_only(filepath=pkl_file, params=params)
 
     elif params.stage == "test":
         # test the model
