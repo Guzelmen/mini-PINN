@@ -250,6 +250,17 @@ class Model_hard_phase2(nn.Module):
         x = inputs[:, 0:1]
         alpha = inputs[:, 1:2]
         norm_alpha = self.scale_alpha(alpha)
+        if self.debug_mode is True:
+            # Debug: check raw vs normalized alpha statistics
+            # (mean/std here are over the current batch)
+            a_mean = alpha.mean().item()
+            a_std = alpha.std(unbiased=False).item()
+            na_mean = norm_alpha.mean().item()
+            na_std = norm_alpha.std(unbiased=False).item()
+            print(
+                f"[During fwd] alpha stats: mean={a_mean:.6g}, std={a_std:.6g} | "
+                f"norm_alpha stats: mean={na_mean:.6g}, std={na_std:.6g}"
+            )
         norm_inp = torch.cat([x, norm_alpha], dim=-1)
 
         h = self.act(self.first(norm_inp))

@@ -505,7 +505,7 @@ def plot_pred_fmt_power(filepath: str, params, number=3):
 
 
 def simple_plot():
-    filepath = PROJECT_ROOT / "predictions/1D/phase2_hardmode_update_model_coeff_1_300ep.pkl"
+    filepath = PROJECT_ROOT / "predictions/2D/addingphi0_training.pkl"
     with open(filepath, "rb") as f:
         data = pickle.load(f)
 
@@ -646,5 +646,40 @@ def simple_log_plot():
     plt.close(fig)
 
 
+def simple_plot_latest_epoch_only():
+    filename = "addingphi0_training"
+    filepath = PROJECT_ROOT / f"predictions/2D/{filename}.pkl"
+    with open(filepath, "rb") as f:
+        data = pickle.load(f)
+
+    # Get the latest epoch (last key, relying on insertion order)
+    epochs = list(data.keys())
+    if not epochs:
+        raise ValueError("No epochs found in predictions file.")
+    latest_epoch = epochs[-1]
+
+    fig, ax = plt.subplots(figsize=(6, 4))
+
+    inputs = data[latest_epoch]["x"].flatten()
+    outputs = data[latest_epoch]["outputs"].flatten()
+
+    sort_idx = np.argsort(inputs)
+    x = inputs[sort_idx]
+    y1 = outputs[sort_idx]
+
+    ax.plot(x, y1, '+', color="red", ms=0.5, label=r'$\psi(x)$')
+
+    ax.set_xlabel('x')
+    ax.set_title(f"Epoch: {latest_epoch}")
+    ax.legend(loc='best', framealpha=0.9)
+
+    fig.tight_layout()
+    plt.show()
+    save_path = PROJECT_ROOT / f"plot_predictions/2D/{filename}_latestepoch.png"
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(save_path)
+    plt.close(fig)
+
+
 if __name__ == "__main__":
-    simple_log_plot()
+    simple_plot_latest_epoch_only()

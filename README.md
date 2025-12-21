@@ -1,87 +1,89 @@
 ## Mini Physics-Informed Neural Network
 
-This is the first task for my MSci Project.
-
-### Problem setup
-
-**Phase 1**:
-
-Functions, classes, variables... with a "phase_1" in their name, refer to the first experiment considered, very simplified Thomas Fermi model, by removing the dependence of the RHS on psi/V.
-
-- Uses only x as input
-
-- PDE residual for the loss: $\frac{d^2 f(x)}{dx^2} = 3x$
-
-- f(x) = $\psi$(x) is the transformed version of V(r) variable we care about in TF, to remove dependencies on other values in the residual
-
-- Boundary Conditions:
-    - BC 1: $\psi$(0) = 1
-    - BC 2: $\psi$'(1) = $\psi$(1)
-
-**Phase 2**:
-
-Functions, classes, variables... with a "phase_2" in their name, refer to the second experiment considered, less simplified but still no T.
-
-*Need to complete.*
+Small PINN experiments for my MSci project, refactored into a simple `src/` package with YAML‑driven configs.
 
 
-### PINN architecture
+### Refactor overview & layout
 
-*Need to add.*
-
-
-### Constraint types
-
-*Need to add.*
-
-
-### How it works
-
-- Data
-  - Place your pre-generated tensors under `data/` (not tracked in git). Expected key: `'X'` with shape `[N, 2]` or `[N, 3]` depending on the phase.
-  - Use `data_utils/generator.py` if you want to create synthetic datasets.
-  - Loading and normalization are handled by `data_utils/loader.py` and `data_utils/normalisation.py`.
-
-- Config
-  - All runs are configured via YAMLs in `yamls/`. Pick a file (e.g., `phase_2.yaml`) and adjust hyperparameters.
-  - Key fields: `phase`, `mode` (`soft`/`hard`), `stage` (`train`/`test`), `data_path`, `batch_size`, LR schedule, wandb fields.
-
-- Train
-  - Run: `python main.py --config phase_2`
-  - The script loads `yamls/phase_2.yaml`, builds the model as `Model_{mode}_phase{phase}` from `models.py`, loads data, and trains with `trainer.py`.
-  - Weights & Biases logs are enabled if configured.
-
-- Models and losses
-  - Architectures live in `models.py` with soft/hard variants by phase.
-  - Losses (PDE residual + BCs) live in `losses.py`, also split by phase.
-
-- Predictions and plots
-  - During/after training, predictions are saved as `.pkl` files under `predictions/` (not tracked).
-  - Plot utilities are in `eval_predictions.py`:
-    - `plot_pred_phase1`: phase-1 specific plotting plus polynomial fit.
-    - `plot_pred_general`: general plotting; optional fitting of several families.
-    - `plot_pred_specific`: fit and plot a single chosen family (e.g., `"poly4"`, `"exp"`).
-  - Figures are written to `plot_predictions/` (not tracked).
-
-- Not tracked in git
-  - `data/*.pt`, `predictions/*.pkl`, `plot_predictions/*.png`, `wandb/` runs, and other large artifacts are ignored via `.gitignore`.
+- Code now lives under `src/` as an importable package:
+  - `src/main.py`: training entrypoint (YAML‑driven).
+  - `src/trainer.py`: training loop, logging, saving predictions/weights.
+  - `src/models.py`: model architectures, selected via `mode` and `phase`.
+  - `src/losses.py`: residual and BC loss definitions (by phase).
+  - `src/data_utils/`: data loading and preprocessing.
+  - `src/eval_predictions.py`: plotting utilities working from saved predictions.
+  - `src/infer_model.py`: helper to rebuild a model from a YAML + saved state dict.
+  - `src/color_map.py`: builds a 2D grid in \((x,\alpha)\), evaluates a trained phase‑2 model, and saves a residual\(^2\) colormap.
+- All runs are configured through YAML files in `src/yamls/`.
 
 
 ### Setup
 
-1) Create an environment, then install dependencies:
+1. Create and activate a Python environment.
+2. Install dependencies from the project root:
 
-```
-pip install -r requirements.txt
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+3. (Optional) Log in to Weights & Biases once:
+
+   ```bash
+   wandb login
+   ```
+
+   or set `WANDB_MODE=offline` if you don't want online logging.
+
+
+### Prepare data
+
+- Place a `.pt` data tensor(s) under `data/` (this directory is not tracked by git).
+- Point the YAML `data_path` to the file you want to use, for example:
+
+  ```yaml
+  data_path: "data/phase_2_final_x_alpha_64k.pt"
+  ```
+
+
+### How to run training
+
+From the project root, call the training entrypoint as a module and pass the YAML stem (without `.yaml`) using `--config`:
+
+```bash
+python -m src.main --config phase_2_basic
 ```
 
-2) Put your dataset at the path referenced by `data_path` in the YAML (e.g., `data/64k_x_log_r0.pt`).
+This will:
+- Load `src/yamls/phase_2_basic.yaml` via `YParams`.
+- Build the model class `Model_{mode}_phase{phase}` from `src/models.py`.
+- Load and batch data using `src/data_utils/loader.py`.
+- Train using `src/trainer.py`, logging to Weights & Biases.
+- Periodically save predictions and (optionally) plots and weight checkpoints, depending on the YAML flags.
 
-3) Launch training:
+You can swap to another experiment just by changing the config name, e.g.:
 
+```bash
+python -m src.main --config phase_2_fmt_help
 ```
-python main.py --config phase_2
-```
+
+
+### What gets saved where
+
+Exact paths are controlled by YAML keys like `run_name`, `n_vars`, `pred_dir`, `plot_dir`,
+`save_weights`, and `save_weights_every`, but the defaults are:
+
+- **Predictions**:
+  - During training, every `save_every` epochs the trainer collects predictions and, at the end,
+    writes a single pickle file:
+    - `predictions/{n_vars}D/{run_name}.pkl`
+- **Plots**:
+  - If `plot_auto: True` in the YAML, `src/main.py` calls `plot_pred_only` from
+    `src/eval_predictions.py` after training, saving:
+    - `plot_predictions/{n_vars}D/{run_name}.png`
+  - You can also use other helpers in `src/eval_predictions.py` to generate additional plots from a specific prediction file.
+- **Weights / checkpoints**:
+  - If `save_weights: True` and `save_weights_every` is set, `src/trainer.py` writes state dicts:
+    - `saving_weights/{run_name}/weights_epoch_{EPOCH}`
+
 
 *Created by Guzman Sanchez, 2025.*
-

@@ -140,6 +140,29 @@ def generate_phase2_final(out_path=PROJECT_ROOT / "data/phase_2_small_alpha.pt",
     torch.save(X, out_path)
     print(f"Saved tensor of shape {tuple(X.shape)} to {out_path}")
 
+
+def generate_phase2_combo(out_path=PROJECT_ROOT / "data/phase_2_500x_128alpha.pt",
+                          seed=42, n_x=500, n_alpha=128):
+    torch.manual_seed(seed)
+    x = torch.linspace(0.0, 1.0, steps=n_x).unsqueeze(1)
+    r0 = torch.logspace(math.log10(5e-11), math.log10(5e-8),
+                        steps=n_alpha).unsqueeze(1)
+    a0 = 5.291772105e-11  # in meters
+    b = 0.25 * (4.5 * math.pi**2)**(1/3) * a0
+    alpha = r0 / b
+
+    # Build Cartesian product of x (size n_x) and alpha (size n_alpha)
+    # Result: X has shape [n_x * n_alpha, 2] = [N, 2] with columns [x, alpha]
+    Nx, Na = x.shape[0], alpha.shape[0]
+    xT = x.repeat(Na, 1)                     # [Nx * Na, 1]
+    alphaT = alpha.repeat_interleave(Nx, 0)  # [Nx * Na, 1]
+    X = torch.cat([xT, alphaT], dim=1)       # [Nx * Na, 2]
+
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    torch.save(X, out_path)
+    print(f"Saved tensor of shape {tuple(X.shape)} to {out_path}")
+
+
 def generate_logx_logr0(out_path=PROJECT_ROOT / "data/phase_2_log_x_log_alpha_64k.pt",
                           seed=42, n_points=64000):
     torch.manual_seed(seed)
@@ -156,4 +179,4 @@ def generate_logx_logr0(out_path=PROJECT_ROOT / "data/phase_2_log_x_log_alpha_64
     print(f"Saved tensor of shape {tuple(X.shape)} to {out_path}")
 
 if __name__ == "__main__":
-    generate_phase2_final()
+    generate_phase2_combo()

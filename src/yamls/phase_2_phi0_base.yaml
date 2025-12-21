@@ -7,7 +7,7 @@ base_config: &BASE_CONFIG
   random_seed: 42
 
   phase: 2
-  run_name: "phi0train_k100_dupdata_500ep"
+  run_name: "phi0train_dupdata_500ep"
   n_vars: 2
   debug_mode: false
 
@@ -19,7 +19,7 @@ base_config: &BASE_CONFIG
   activation: "SiLU" # SiLU, ReLU, Identity, SIREN, GELU
   w0: 30
   add_phi0: True
-  k_val: 100
+  k_val: 10
 
   ## normalisation
   norm_mode: "standardize"   # minmax or standardize
