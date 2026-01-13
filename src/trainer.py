@@ -108,7 +108,10 @@ def trainer(
     epochs = params.epochs
 
     # Initialize LossWeighter
-    weighter_name = f"LossWeighter_phase{params.phase}"
+    if params.phase == 3:
+        weighter_name = f"LossWeighter_phase2"
+    else:
+        weighter_name = f"LossWeighter_phase{params.phase}"
     Weighterclass = getattr(losses, weighter_name)
     weighter = Weighterclass(params)
 
@@ -181,8 +184,8 @@ def trainer(
             # Data shape: [batch_size, 2] where columns are [x, r0]
             inputs = batch[0]  # Unpack tuple from DataLoader
             
-            # Clamp x to avoid singularity at x=0 (d2/dx2 of x^1.5 is infinite at 0)
-            inputs[:, 0].clamp_(min=1e-6)
+            # Clamp x to avoid singularity at x=0 and ensure x <= 1 for phi_0_transform
+            inputs[:, 0].clamp_(min=1e-6, max=1.0)
 
             # Ensure inputs require gradients for autograd wrt x
             inputs.requires_grad_(True)
@@ -203,7 +206,10 @@ def trainer(
                 epoch_d2check.append(d2check.detach())
 
             # Compute individual losses
-            residual_name = f"compute_residual_loss_phase{params.phase}"
+            if params.phase == 3:
+                residual_name = f"compute_residual_loss_phase2"
+            else:
+                residual_name = f"compute_residual_loss_phase{params.phase}"
             residual_fn = getattr(losses, residual_name)
             residual_loss = residual_fn(outputs, inputs, params=params)
 
@@ -243,7 +249,10 @@ def trainer(
                     raw_losses_for_weighting['fmt'].append(fmt_loss.detach())
 
             
-            totlossname = f"compute_total_loss_phase{params.phase}"
+            if params.phase == 3:
+                totlossname = f"compute_total_loss_phase2"
+            else:
+                totlossname = f"compute_total_loss_phase{params.phase}"
             totloss_fn = getattr(losses, totlossname)
             total_loss = totloss_fn(loss_dict, weighter)
 
@@ -348,7 +357,7 @@ def trainer(
         # In hard mode, log hard-constraint checks using explicit probes at x=0 and x=1
         checks = {}
         if params.mode == "hard" and ep % 10 == 0:
-            alpha_check = torch.tensor([[1e3]])
+            alpha_check = torch.tensor([[1e2]])
             x0 = torch.zeros_like(alpha_check)
             x1 = torch.ones_like(alpha_check)
 
@@ -402,6 +411,10 @@ def trainer(
 
             for batch in val:
                 inputs = batch[0]  # Unpack tuple from DataLoader
+                
+                # Clamp x to avoid singularity at x=0 and ensure x <= 1 for phi_0_transform (same as training)
+                inputs[:, 0].clamp_(min=1e-6, max=1.0)
+                
                 # Ensure inputs require gradients for derivative-based losses
                 inputs.requires_grad_(True)
 
@@ -409,9 +422,12 @@ def trainer(
                 outputs = model(inputs)
 
                 # Compute individual losses
-                residual_name = f"compute_residual_loss_phase{params.phase}"
+                if params.phase == 3:
+                    residual_name = f"compute_residual_loss_phase2"
+                else:
+                    residual_name = f"compute_residual_loss_phase{params.phase}"
                 residual_fn = getattr(losses, residual_name)
-                residual_loss = residual_fn(outputs, inputs, params=params)
+                residual_loss = residual_fn(outputs, inputs, params=params, val_stage=True)
 
                 if getattr(params, "fmt_help", False):
                     fmt_loss = losses.compute_fmt_loss_phase2(model, inputs, outputs, params)

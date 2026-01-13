@@ -26,17 +26,18 @@ from .infer_model import load_model_from_config_and_state
 
 
 # ====== USER-EDITABLE CONSTANTS ======
-RUN_NAME: str = "phi0train_dupdata_500ep"
-CONFIG_NAME: str = "phase_2_phi0_base"
+RUN_NAME: str = "phi0_logx_redalpha_m05_k10_tanh"
+# CHECK ACTIVATION OF THE RUN
+CONFIG_NAME: str = "phase_2_phi0"
 N: int = 200  # grid resolution in each direction
 
 # Grid controls
 a0 = 5.291772105e-11  # in meters
 b = 0.25 * (4.5 * math.pi**2)**(1/3) * a0
-LOG_X: bool = False
+LOG_X: bool = True
 LOG_ALPHA: bool = True
-MIN_ALPHA: float = (5e-11)/b
-MAX_ALPHA: float = (5e-8)/b
+MIN_ALPHA: float = 1
+MAX_ALPHA: float = 100
 
 # Device selection: "auto" chooses CUDA if available, else CPU
 DEVICE: str = "auto"
@@ -77,22 +78,39 @@ def find_latest_state_path(run_name: str) -> Path:
     return latest_path
 
 
-def build_grid(n: int, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def build_grid(
+    n: int,
+    device: torch.device,
+    log_x: bool = None,
+    log_alpha: bool = None,
+    min_alpha: float = None,
+    max_alpha: float = None,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Build a grid of (x, alpha) values.
 
-    x      in [0.0, 1.0]  (log-spaced >0..1 if LOG_X is True)
-    alpha  in [MIN_ALPHA, MAX_ALPHA] (log-spaced if LOG_ALPHA is True)
+    x      in [0.0, 1.0]  (log-spaced >0..1 if log_x is True)
+    alpha  in [min_alpha, max_alpha] (log-spaced if log_alpha is True)
 
     Returns:
         X_grid:   [N, N] tensor of x values
         A_grid:   [N, N] tensor of alpha values
         inputs:   [N*N, 2] tensor of (x, alpha) pairs (requires_grad=True)
     """
+    # Use module-level defaults if not provided
+    if log_x is None:
+        log_x = LOG_X
+    if log_alpha is None:
+        log_alpha = LOG_ALPHA
+    if min_alpha is None:
+        min_alpha = MIN_ALPHA
+    if max_alpha is None:
+        max_alpha = MAX_ALPHA
+    
     # x grid
-    if LOG_X:
+    if log_x:
         # Avoid log(0); start from a small positive value
-        x_min = 1e-3
+        x_min = 1e-6
         if x_min <= 0.0:
             raise ValueError("x_min for log-spaced x must be > 0.")
         x_vals = torch.logspace(
@@ -105,17 +123,17 @@ def build_grid(n: int, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor
         x_vals = torch.linspace(0.0, 1.0, steps=n, device=device)
 
     # alpha grid
-    if MIN_ALPHA <= 0.0 and LOG_ALPHA:
-        raise ValueError("MIN_ALPHA must be > 0 when LOG_ALPHA is True.")
-    if LOG_ALPHA:
+    if min_alpha <= 0.0 and log_alpha:
+        raise ValueError("min_alpha must be > 0 when log_alpha is True.")
+    if log_alpha:
         alpha_vals = torch.logspace(
-            start=torch.log10(torch.tensor(MIN_ALPHA, device=device)),
-            end=torch.log10(torch.tensor(MAX_ALPHA, device=device)),
+            start=torch.log10(torch.tensor(min_alpha, device=device)),
+            end=torch.log10(torch.tensor(max_alpha, device=device)),
             steps=n,
             device=device,
         )
     else:
-        alpha_vals = torch.linspace(MIN_ALPHA, MAX_ALPHA, steps=n, device=device)
+        alpha_vals = torch.linspace(min_alpha, max_alpha, steps=n, device=device)
 
     # Meshgrid with alpha as rows (y-axis) and x as columns (x-axis)
     A_grid, X_grid = torch.meshgrid(alpha_vals, x_vals, indexing="ij")
@@ -172,11 +190,22 @@ def plot_and_save_colormap(
     A_grid: torch.Tensor,
     residual_sq: torch.Tensor,
     run_name: str,
+    output_dir: str = "color_maps",
+    n: int = None,
+    log_x: bool = None,
+    log_alpha: bool = None,
 ) -> None:
     """
     Plot a colormap of the residual squared over (x, alpha) and save to:
-        PROJECT_ROOT / "color_maps" / f"{run_name}.png"
+        PROJECT_ROOT / output_dir / f"{run_name}.png"
     """
+    # Use module-level defaults if not provided
+    if log_x is None:
+        log_x = LOG_X
+    if log_alpha is None:
+        log_alpha = LOG_ALPHA
+    if n is None:
+        n = N
     # Move to CPU and reshape residuals to [N, N]
     X_np = X_grid.detach().cpu().numpy()
     A_np = A_grid.detach().cpu().numpy()
@@ -197,31 +226,45 @@ def plot_and_save_colormap(
     ax.set_ylabel(r"$\alpha$")
 
     # If we used log spacing for either axis, show that explicitly in the plot
-    if LOG_X:
+    if log_x:
         ax.set_xscale("log")
-    if LOG_ALPHA:
+    if log_alpha:
         ax.set_yscale("log")
     ax.set_title(f"Phase 2 residual$^2$ map: {run_name}")
 
     fig.tight_layout()
 
-    out_dir = PROJECT_ROOT / "color_maps"
+    out_dir = PROJECT_ROOT / output_dir
     out_dir.mkdir(parents=True, exist_ok=True)
     tag = ""
-    if LOG_ALPHA:
+    if log_alpha:
         tag += "_logalpha"
-    if LOG_X:
+    if log_x:
         tag += "_logx"
-    out_path = out_dir / f"{run_name}_{N}x{N}{tag}.png"
+    out_path = out_dir / f"{run_name}_colormap_{n}x{n}{tag}.png"
     fig.savefig(out_path, dpi=300)
     plt.close(fig)
 
 
-def simple_plot_latest_epoch_only(outputs: torch.Tensor, inputs: torch.Tensor) -> None:
+def simple_plot_latest_epoch_only(
+    outputs: torch.Tensor,
+    inputs: torch.Tensor,
+    run_name: str = None,
+    output_dir: str = "color_maps",
+    log_x: bool = None,
+    log_alpha: bool = None,
+) -> None:
     """
     Quick helper to plot psi(x) vs x for the current grid, mainly for debugging.
     Uses the model outputs and the first column of inputs (x).
     """
+    # Use module-level defaults if not provided
+    if run_name is None:
+        run_name = RUN_NAME
+    if log_x is None:
+        log_x = LOG_X
+    if log_alpha is None:
+        log_alpha = LOG_ALPHA
     # Extract x (first column) and move everything to numpy for plotting
     x_t = inputs[:, 0:1].detach().cpu()
     y_t = outputs.detach().cpu()
@@ -245,16 +288,20 @@ def simple_plot_latest_epoch_only(outputs: torch.Tensor, inputs: torch.Tensor) -
 
     ax.set_xlabel("x")
     ax.set_ylabel(r"$\psi(x)$")
-    ax.set_title(f"{RUN_NAME} – prediction check")
+    ax.set_title(f"{run_name} – prediction check")
     ax.legend(loc="best", framealpha=0.9)
+    
+    # Apply log scale if x was log-spaced
+    if log_x:
+        ax.set_xscale("log")
 
     fig.tight_layout()
     tag = ""
-    if LOG_ALPHA:
+    if log_alpha:
         tag += "_logalpha"
-    if LOG_X:
+    if log_x:
         tag += "_logx"
-    save_path = PROJECT_ROOT / "color_maps" / f"{RUN_NAME}_checkingpred{tag}.png"
+    save_path = PROJECT_ROOT / output_dir / f"{run_name}_pred_vs_x{tag}.png"
     save_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(save_path)
     plt.close(fig)
@@ -286,18 +333,39 @@ def main():
     torch.set_grad_enabled(True)
 
     # Build (x, alpha) grid and input tensor
-    X_grid, A_grid, inputs = build_grid(N, device=device)
+    X_grid, A_grid, inputs = build_grid(
+        N, 
+        device=device,
+        log_x=LOG_X,
+        log_alpha=LOG_ALPHA,
+        min_alpha=MIN_ALPHA,
+        max_alpha=MAX_ALPHA
+    )
 
     # Forward pass
     outputs = model(inputs)
 
-    simple_plot_latest_epoch_only(outputs, inputs)
+    simple_plot_latest_epoch_only(
+        outputs, 
+        inputs,
+        log_x=LOG_X,
+        log_alpha=LOG_ALPHA,
+        output_dir=f"plot_predictions/newfiles/{RUN_NAME}"
+    )
 
     # Compute pointwise squared residuals
     residual_sq = compute_pointwise_residual_sq(outputs, inputs)
 
     # Plot and save colormap
-    plot_and_save_colormap(X_grid, A_grid, residual_sq, RUN_NAME)
+    plot_and_save_colormap(
+        X_grid, 
+        A_grid, 
+        residual_sq, 
+        RUN_NAME,
+        log_x=LOG_X,
+        log_alpha=LOG_ALPHA,
+        output_dir=f"plot_predictions/newfiles/{RUN_NAME}"
+    )
 
 
 if __name__ == "__main__":

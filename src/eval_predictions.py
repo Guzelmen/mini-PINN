@@ -549,13 +549,15 @@ def simple_plot():
 
 
 
-def plot_pred_only(filepath: str, params, enable_fit: bool = False):
+def plot_pred_only(filepath: str, params, enable_fit: bool = False, output_dir: str = None):
     """
     General plotting utility:
     - Loads predictions the same way as plot_pred_phase1 (predictions/{filename}.pkl)
     - Plots y vs x per saved epoch in a grid
     - If enable_fit=False (default): only plots the data points.
       Note: Fitting is currently disabled by request.
+    - output_dir: Optional custom output directory (relative to PROJECT_ROOT). 
+                  If None, uses params.plot_dir / f"{params.n_vars}D"
     """
     with open(filepath, "rb") as f:
         data = pickle.load(f)
@@ -597,7 +599,13 @@ def plot_pred_only(filepath: str, params, enable_fit: bool = False):
         ax.set_visible(False)
 
     fig.tight_layout()
-    save_path = PROJECT_ROOT / params.plot_dir / f"{params.n_vars}D" / f"{params.run_name}.png"
+    
+    # Use custom output_dir if provided, otherwise use default path
+    if output_dir is not None:
+        save_path = PROJECT_ROOT / output_dir / f"{params.run_name}.png"
+    else:
+        save_path = PROJECT_ROOT / params.plot_dir / f"{params.n_vars}D" / f"{params.run_name}.png"
+    
     save_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(save_path)
     plt.close(fig)

@@ -3,7 +3,13 @@ Will run training and inference from here.
 """
 import random
 from . import models
-from .color_map import find_latest_state_path
+from .color_map import (
+    find_latest_state_path,
+    build_grid,
+    compute_pointwise_residual_sq,
+    plot_and_save_colormap,
+    simple_plot_latest_epoch_only,
+)
 from .trainer import trainer
 from .data_utils.loader import load_data, get_data_loaders
 from . import eval_predictions as ev
@@ -68,7 +74,7 @@ if __name__ == "__main__":
     # then log diagnostics for val/test distributions. These stats are stored on `params`
     # for the model to use during forward passes.
     try:
-        if int(params.phase) == 2 and str(params.mode).strip() == "hard":
+        if int(params.phase) != 1 and str(params.mode).strip() == "hard":
             # Fit mean/std on train only
             X_train = data["train"]
             X_val = data["val"]
@@ -221,10 +227,64 @@ if __name__ == "__main__":
     if params.stage == "train":
         # train the model
         trainer(model, train_loader, val_loader, params)
-        # plot predictions
+        
+        # Unified output directory for all diagnostic plots
+        output_dir = f"{params.plot_dir}/newfiles/{params.run_name}"
+        
+        # plot predictions from saved pickle (evolution over epochs)
         pkl_file = PROJECT_ROOT / params.pred_dir / f"{params.n_vars}D" / f"{params.run_name}.pkl"
         if params.plot_auto:
-            ev.plot_pred_only(filepath=pkl_file, params=params)
+            ev.plot_pred_only(filepath=pkl_file, params=params, output_dir=output_dir)
+        
+        # Additional diagnostic plots using the trained model directly
+        print("[main] Generating post-training diagnostic plots...")
+        device = torch.device("cpu")  # Training runs on CPU
+        
+        # Enable gradients for computing residuals (need second derivatives)
+        torch.set_grad_enabled(True)
+        model.eval()
+        
+        # Build grid: 200x200 points in (x, alpha) space
+        n_grid = 200
+        log_x_plots = "logx" in params.data_path or "LOG500x" in params.data_path or "log_x" in params.data_path
+        max_alpha = (100 if "RED" in params.data_path else 1000)
+    
+        X_grid, A_grid, inputs = build_grid(
+            n=n_grid,
+            device=device,
+            log_x=log_x_plots,
+            log_alpha=True,
+            min_alpha=1,
+            max_alpha=max_alpha
+        )
+        
+        # Forward pass
+        outputs = model(inputs)
+        
+        # 1. Simple prediction plot: psi(x) vs x
+        simple_plot_latest_epoch_only(
+            outputs=outputs,
+            inputs=inputs,
+            run_name=params.run_name,
+            output_dir=output_dir,
+            log_x=log_x_plots,
+            log_alpha=True,
+        )
+        
+        # 2. Colormap of residual^2 over (x, alpha)
+        residual_sq = compute_pointwise_residual_sq(outputs, inputs)
+        plot_and_save_colormap(
+            X_grid=X_grid,
+            A_grid=A_grid,
+            residual_sq=residual_sq,
+            run_name=params.run_name,
+            output_dir=output_dir,
+            n=n_grid,
+            log_x=log_x_plots,
+            log_alpha=True,
+        )
+        
+        print("[main] All diagnostic plots complete.")
 
     elif params.stage == "test":
         # Load the latest checkpoint weights into the already-constructed model.

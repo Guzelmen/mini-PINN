@@ -141,11 +141,13 @@ def generate_phase2_final(out_path=PROJECT_ROOT / "data/phase_2_small_alpha.pt",
     print(f"Saved tensor of shape {tuple(X.shape)} to {out_path}")
 
 
-def generate_phase2_combo(out_path=PROJECT_ROOT / "data/phase_2_500x_128alpha.pt",
+def generate_phase2_combo(out_path=PROJECT_ROOT / "data/phase_2_LOG500x_RED128alpha.pt",
                           seed=42, n_x=500, n_alpha=128):
     torch.manual_seed(seed)
-    x = torch.linspace(0.0, 1.0, steps=n_x).unsqueeze(1)
-    r0 = torch.logspace(math.log10(5e-11), math.log10(5e-8),
+    # Use log10 for torch.logspace (it expects base-10 exponents)
+    x = torch.logspace(math.log10(1e-6), math.log10(1.0), steps=n_x).unsqueeze(1)
+    # x = torch.linspace(0.0, 1.0, steps=n_x).unsqueeze(1)
+    r0 = torch.logspace(math.log10(5e-11), math.log10(5e-9),
                         steps=n_alpha).unsqueeze(1)
     a0 = 5.291772105e-11  # in meters
     b = 0.25 * (4.5 * math.pi**2)**(1/3) * a0

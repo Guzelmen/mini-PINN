@@ -334,7 +334,7 @@ def compute_total_loss_phase1(loss_dict, weighter):
 # Phase 2 losses
 # =========================
 
-def compute_residual_loss_phase2(outputs, inputs, params):
+def compute_residual_loss_phase2(outputs, inputs, params, val_stage: bool = False):
     """
     Nonlinear TF residual for phase 2:
         psi''(x) = C * x^{-1/2} * [psi(x)]^{3/2}
@@ -344,10 +344,16 @@ def compute_residual_loss_phase2(outputs, inputs, params):
 
     C depends on r0, and x not in denominator.
 
+    Optionally supports weighted residual with parameter m:
+        residual = ( (x**(0.5 + m)) / (alpha**1.5) ) * d2phi_dx2 - (x**m) * (phi**1.5)
+
     Args:
         outputs: psi(x) predictions, shape [batch, 1] (requires_grad=True)
         inputs: x & alpha, shape [batch, 2] (requires_grad=True)
         params: configs
+            - use_m_loss (bool): If True, use m-weighted residual. Default False.
+            - m_loss_m_value (float): Value of m for weighted residual. Default 0.0.
+            - cancel_c (bool): If True, cancel the 1/C factor (only for standard loss).
 
     Returns:
         residual loss: mean squared residual over the batch
@@ -374,12 +380,22 @@ def compute_residual_loss_phase2(outputs, inputs, params):
     if (phi < 0).any() and params.debug_mode is True:
         print("[During loss] Watch out: phi (exp(w) + phi0) is negative.")
 
-    # Optionally cancel the 1/c factor if requested via params.cancel_c
-    cancel_c = getattr(params, "cancel_c", False)
-    if cancel_c:
-        residual = (d2phi_dx2 * x**0.5) - phi**1.5
+    # Check if we should use the m-weighted residual
+    use_m_loss = getattr(params, "use_m_loss", False)
+    
+    if use_m_loss and not val_stage:
+        # Weighted residual with parameter m:
+        # residual = ( (x**(0.5 + m)) / (alpha**1.5) ) * d2phi_dx2 - (x**m) * (phi**1.5)
+        m = getattr(params, "m_loss_m_value", 0.0)
+        residual = ((x ** (0.5 + m)) / c) * d2phi_dx2 - (x ** m) * (phi ** 1.5)
     else:
-        residual = (d2phi_dx2 * x**0.5) / c - phi**1.5
+        # Standard residual (original formulation)
+        # Optionally cancel the 1/c factor if requested via params.cancel_c
+        cancel_c = getattr(params, "cancel_c", False)
+        if cancel_c:
+            residual = (d2phi_dx2 * x**0.5) - phi**1.5
+        else:
+            residual = (d2phi_dx2 * x**0.5) / c - phi**1.5
 
     if params.loss_type == "mse":
         res = (residual**2)
