@@ -97,6 +97,10 @@ class Model_hard_phase1(nn.Module):
         # Initialize activation function
         if activation == "SiLU":
             act = nn.SiLU()
+        elif activation == "Tanh":
+            act = nn.Tanh()
+        elif activation == "Mish":
+            act = nn.Mish()
         elif activation == "Identity":
             act = nn.Identity()
         elif activation == "ReLU":
@@ -181,6 +185,8 @@ class Model_hard_phase2(nn.Module):
             act = nn.SiLU()
         elif activation == "Tanh":
             act = nn.Tanh()
+        elif activation == "Mish":
+            act = nn.Mish()
         elif activation == "Identity":
             act = nn.Identity()
         elif activation == "ReLU":
@@ -292,6 +298,7 @@ class Model_hard_phase2(nn.Module):
 
         return Phi
 
+
 class Model_hard_phase3(nn.Module):
     """
     Inputs: x in [0,1], sqrt(x), alpha between ~1 and 100-100. Output: Psi(x).
@@ -324,6 +331,8 @@ class Model_hard_phase3(nn.Module):
             act = nn.SiLU()
         elif activation == "Tanh":
             act = nn.Tanh()
+        elif activation == "Mish":
+            act = nn.Mish()
         elif activation == "Identity":
             act = nn.Identity()
         elif activation == "ReLU":
@@ -416,7 +425,7 @@ class Model_hard_phase3(nn.Module):
             h = self.act(layer(h))
         N = self.out(h)
 
-        N_prime = first_deriv_auto(N, enriched_inp, var1=0)
+        N_prime = first_deriv_auto(N, inputs, var1=0)
 
         #debugging
         if self.debug_mode is True:

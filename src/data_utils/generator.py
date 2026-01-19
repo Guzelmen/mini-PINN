@@ -159,7 +159,7 @@ def generate_phase2_combo(out_path=PROJECT_ROOT / "data/phase_2_LOG500x_RED128al
     xT = x.repeat(Na, 1)                     # [Nx * Na, 1]
     alphaT = alpha.repeat_interleave(Nx, 0)  # [Nx * Na, 1]
     X = torch.cat([xT, alphaT], dim=1)       # [Nx * Na, 2]
-
+    
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     torch.save(X, out_path)
     print(f"Saved tensor of shape {tuple(X.shape)} to {out_path}")

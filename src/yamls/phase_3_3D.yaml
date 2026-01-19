@@ -7,7 +7,7 @@ base_config: &BASE_CONFIG
   random_seed: 42
 
   phase: 3 # simply easier for model naming, still T=0
-  run_name: "3d_sqrtx_logx_redalpha_m05_tanh"
+  run_name: "3d_sweep_1000ep"
   n_vars: 3
   debug_mode: False
 
@@ -16,11 +16,12 @@ base_config: &BASE_CONFIG
   inp_dim: 3
   nlayers: 6
   hidden: 32
-  activation: "Tanh" # SiLU, Tanh, ReLU, Identity, SIREN, GELU
+  activation: "Tanh" # SiLU, Tanh, ReLU, Identity, SIREN, GELU, Mish
   w0: 30
   add_phi0: False
   k_val: 10
   use_m_loss: True
+  update_m: False
   m_loss_m_value: 0.5
 
   ## normalisation
@@ -42,6 +43,7 @@ base_config: &BASE_CONFIG
   end_lr: 5e-4
   lr_warmup_epochs: 100
   min_lr: 1e-5  # Minimum LR for cosine decay
+  grad_clipping: False
 
   ## loss parameters
   loss_type: "mse" # might need to rethink if magnitude issues
@@ -57,13 +59,13 @@ base_config: &BASE_CONFIG
 
   ## training parameters
   stage: "train"
-  epochs: 500
-  save_every: 50
+  epochs: 1000
+  save_every: 100
 
   # saving
   plot_auto: True
   save_weights: True
-  save_weights_every: 50
+  save_weights_every: 100
   pred_dir: "predictions"
   plot_dir: "plot_predictions"
   

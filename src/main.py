@@ -2,6 +2,7 @@
 Will run training and inference from here.
 """
 import random
+import os
 from . import models
 from .color_map import (
     find_latest_state_path,
@@ -23,28 +24,7 @@ import warnings
 
 warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
 
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", required=True)
-    args = parser.parse_args()
-
-    yaml = args.config
-
-    params = YParams(
-        PROJECT_ROOT / "src/yamls" / f"{yaml}.yaml",
-        "base_config",
-        print_params=True,
-    )
-
-    wandb.login()
-    wandb.init(
-        name=params.run_name,
-        group=params.wandb_group,
-        project=params.wandb_project,
-        entity=params.wandb_entity,
-    )
-
+def run_training(params):
     # Log all hyperparameters from config
     # Convert params to dict to ensure all parameters are captured
     config_dict = {}
@@ -229,10 +209,16 @@ if __name__ == "__main__":
         trainer(model, train_loader, val_loader, params)
         
         # Unified output directory for all diagnostic plots
-        output_dir = f"{params.plot_dir}/newfiles/{params.run_name}"
+        # If in sweep mode, organize under sweep_name subfolder
+        sweep_name = getattr(params, "sweep_name", None)
+        if sweep_name:
+            output_dir = f"{params.plot_dir}/newfiles/{sweep_name}/{params.run_name}"
+            pkl_file = PROJECT_ROOT / params.pred_dir / f"{params.n_vars}D" / sweep_name / f"{params.run_name}.pkl"
+        else:
+            output_dir = f"{params.plot_dir}/newfiles/{params.run_name}"
+            pkl_file = PROJECT_ROOT / params.pred_dir / f"{params.n_vars}D" / f"{params.run_name}.pkl"
         
         # plot predictions from saved pickle (evolution over epochs)
-        pkl_file = PROJECT_ROOT / params.pred_dir / f"{params.n_vars}D" / f"{params.run_name}.pkl"
         if params.plot_auto:
             ev.plot_pred_only(filepath=pkl_file, params=params, output_dir=output_dir)
         
@@ -312,3 +298,89 @@ if __name__ == "__main__":
         raise ValueError(f"Invalid stage: {params.stage}")
 
     wandb.finish()
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", required=False, help="Config file name (for regular training)")
+    parser.add_argument("--sweep", required=False, help="Sweep ID (for sweep mode)")
+    parser.add_argument("--base_config", required=False, help="Base config name (for sweep mode)")
+    parser.add_argument("--sweep_name", required=False, help="Sweep name for organizing output files (for sweep mode)")
+    args = parser.parse_args()
+
+    # Check if running in sweep mode
+    sweep_id = args.sweep or os.environ.get("SWEEP_ID")
+    base_config_name = args.base_config or os.environ.get("BASE_CONFIG")
+    sweep_name = args.sweep_name or os.environ.get("SWEEP_NAME")
+    
+    if sweep_id:
+        # Sweep mode
+        if not base_config_name:
+            raise ValueError("BASE_CONFIG required when running in sweep mode. Use --base_config or set BASE_CONFIG env var.")
+        if not sweep_name:
+            raise ValueError("SWEEP_NAME required when running in sweep mode. Use --sweep_name or set SWEEP_NAME env var.")
+        
+        wandb.login()
+        
+        def train_sweep():
+            """Function that will be called by wandb.agent() for each sweep run"""
+            # Load base config first to get wandb settings
+            params = YParams(
+                PROJECT_ROOT / "src/yamls" / f"{base_config_name}.yaml",
+                "base_config",
+                print_params=True,
+            )
+            
+            # Initialize wandb run (this will get hyperparameters from sweep)
+            # Use wandb settings from base config
+            run = wandb.init(
+                name=params.run_name,  # Will be overridden below, but needed for init
+                group=params.wandb_group,
+                project=params.wandb_project,
+                entity=params.wandb_entity,
+            )
+            
+            # Override params with sweep hyperparameters
+            for key, value in wandb.config.items():
+                if hasattr(params, key):
+                    setattr(params, key, value)
+                    print(f"Sweep override: {key} = {value}")
+            
+            # Generate unique run name for sweep and update wandb run name
+            params.run_name = f"run_{run.id[:8]}"
+            run.name = params.run_name  # Update the wandb run name
+            
+            # Set sweep_name on params for file path organization
+            params.sweep_name = sweep_name
+            
+            # Continue with training
+            run_training(params)
+        
+        # Run sweep agent
+        wandb.agent(sweep_id, function=train_sweep, project="mini_pinn", entity="guzelmen_msci_project")
+        
+    else:
+        # Regular training mode
+        if not args.config:
+            raise ValueError("--config required when not in sweep mode")
+        
+        yaml = args.config
+        params = YParams(
+            PROJECT_ROOT / "src/yamls" / f"{yaml}.yaml",
+            "base_config",
+            print_params=True,
+        )
+
+        wandb.login()
+        wandb.init(
+            name=params.run_name,
+            group=params.wandb_group,
+            project=params.wandb_project,
+            entity=params.wandb_entity,
+        )
+        
+        # Continue with training
+        run_training(params)
+
+if __name__ == "__main__":
+    main()

@@ -118,7 +118,7 @@ def trainer(
     # Learning rate parameters
     # Default to cosine if not specified
     lr_type = params.get('lr_type', 'cos')
-    warmup_epochs = params.lr_warmup_epochs
+    warmup_epochs = epochs // 5
     start_lr = params.start_lr
     end_lr = params.end_lr
     min_lr = params.min_lr
@@ -155,8 +155,38 @@ def trainer(
     # Ensure first epoch uses start_lr for warmup schedules without stepping scheduler before optimizer
     if lr_type in ["linear", "cos", "cosine"] and warmup_epochs > 0:
         optimizer.param_groups[0]["lr"] = start_lr
+    
+    # Initialize m decay strategy if update_m is enabled
+    update_m = getattr(params, "update_m", False)
+    current_m = getattr(params, "m_loss_m_value", 0.0)  # Initialize current_m for use in loop
+    m_decay_interval = None  # Will be set if update_m is True
+    m_decay_step = None  # Will be set if update_m is True
+    
+    if update_m:
+        # m_loss_m_value in config is the starting value when update_m is True
+        m_decay_interval = getattr(params, "m_decay_interval", 50)  # Default: reduce every 50 epochs
+        m_decay_step = getattr(params, "m_decay_step", 0.25)  # Default: reduce by 0.25 each time
+        params.m_loss_m_value = current_m  # Set initial value
+        print(f"m decay strategy enabled: starting m={current_m:.3f}, reducing by {m_decay_step:.3f} every {m_decay_interval} epochs")
+    else:
+        # If update_m is False or not set, m_loss_m_value remains constant
+        if getattr(params, "use_m_loss", False):
+            print(f"m loss enabled with constant m={current_m:.3f}")
+    
     for ep in range(1, epochs+1):
         time_start = time.time()
+        
+        # Update m value if update_m strategy is enabled
+        if update_m:
+            # Check if it's time to decay m (at epochs that are multiples of m_decay_interval)
+            if ep > 0 and ep % m_decay_interval == 0:
+                # Reduce m by m_decay_step, but don't go below 0
+                new_m = max(0.0, current_m - m_decay_step)
+                if new_m != current_m:
+                    current_m = new_m
+                    params.m_loss_m_value = current_m
+                    print(f"Epoch {ep}: Updated m to {current_m:.3f}")
+        
         model.train()
 
         epoch_x = []
@@ -175,6 +205,7 @@ def trainer(
             raw_losses_for_weighting['fmt'] = []
         # Collect gradient norms per batch for diagnostics
         epoch_grad_norms = []
+        clipped_grad_norms = []
 
         train_loader_iter = tqdm(
             train, desc=f"Epoch {ep}/{epochs}", leave=True, ncols=100)
@@ -272,9 +303,6 @@ def trainer(
             if total_grad_norm_before > 100 or math.isnan(total_grad_norm_before) and params.debug_mode is True:
                 print(f"[Batch {train_loader_iter.n}] Gradient Norm ALERT: {total_grad_norm_before:.4e}")
 
-            # Clip gradients to prevent explosion
-            # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-
             # Record gradient norm before stepping
             total_grad_sq = 0.0
             num_params_with_grad = 0
@@ -285,6 +313,10 @@ def trainer(
                     num_params_with_grad += 1
             if num_params_with_grad > 0:
                 epoch_grad_norms.append(total_grad_sq ** 0.5)
+
+            # Clip gradients to prevent explosion, if activated
+            if getattr(params, "grad_clipping", False):
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
             optimizer.step()
 
@@ -358,7 +390,7 @@ def trainer(
         checks = {}
         if params.mode == "hard" and ep % 10 == 0:
             alpha_check = torch.tensor([[1e2]])
-            x0 = torch.zeros_like(alpha_check)
+            x0 = torch.zeros_like(alpha_check) + 1e-10
             x1 = torch.ones_like(alpha_check)
 
             inp0 = torch.cat([x0, alpha_check], dim=-1).requires_grad_(True)
@@ -384,7 +416,7 @@ def trainer(
             }
 
         # Log to wandb
-        wandb.log({
+        log_dict = {
             "info/learning_rate": current_lr,
             "info/epoch": ep,
             "info/epoch_training_time": time_taken,
@@ -399,7 +431,11 @@ def trainer(
             **({"weights/fmt_weight": weighter.fmt_weight} if getattr(params, "fmt_help", False) else {}),
             **checks,
             **grad_stats,
-        })
+        }
+        # Log m value if m loss is being used
+        if getattr(params, "use_m_loss", False):
+            log_dict["info/m_loss_m_value"] = getattr(params, "m_loss_m_value", 0.0)
+        wandb.log(log_dict)
 
         # Validation
         if val is not None:
@@ -486,14 +522,24 @@ def trainer(
         save_weights_every = getattr(params, "save_weights_every", None)
         save_weights = getattr(params, "save_weights", False)
         if save_weights is True and isinstance(save_weights_every, int) and save_weights_every > 0 and ep % save_weights_every == 0:
-            weights_dir = PROJECT_ROOT / "saving_weights" / f"{params.run_name}"
+            # If in sweep mode, organize under sweep_name subfolder
+            sweep_name = getattr(params, "sweep_name", None)
+            if sweep_name:
+                weights_dir = PROJECT_ROOT / "saving_weights" / sweep_name / f"{params.run_name}"
+            else:
+                weights_dir = PROJECT_ROOT / "saving_weights" / f"{params.run_name}"
             weights_dir.mkdir(parents=True, exist_ok=True)
             ckpt_path = weights_dir / f"weights_epoch_{ep}"
             torch.save(model.state_dict(), ckpt_path)
             print(f"Saved weights checkpoint to {ckpt_path}")
 
     if len(predictions) != 0:
-        save_path = PROJECT_ROOT / params.pred_dir / f"{params.n_vars}D" / f"{params.run_name}.pkl"
+        # If in sweep mode, organize under sweep_name subfolder
+        sweep_name = getattr(params, "sweep_name", None)
+        if sweep_name:
+            save_path = PROJECT_ROOT / params.pred_dir / f"{params.n_vars}D" / sweep_name / f"{params.run_name}.pkl"
+        else:
+            save_path = PROJECT_ROOT / params.pred_dir / f"{params.n_vars}D" / f"{params.run_name}.pkl"
     
         # Ensure directory exists
         save_path.parent.mkdir(parents=True, exist_ok=True)

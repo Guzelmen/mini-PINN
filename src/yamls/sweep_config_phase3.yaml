@@ -1,0 +1,16 @@
+program: src/main
+method: grid  # or bayes, random
+metric:
+  name: val/total_loss
+  goal: minimize
+parameters:
+  activation:
+    values: ["Tanh", "SiLU", "Mish"]
+  end_lr:
+    values: [2e-4, 5e-4]
+  hidden:
+    values: [32, 64, 128]
+  grad_clipping:
+    values: [True, False]
+  nlayers:
+    values: [6, 8]
