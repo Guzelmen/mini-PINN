@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 import math
 from .utils import first_deriv_auto, sec_deriv_auto, phi_w_transform, phi_0_transform
+from .fd_integrals import B_M, C0_M  # Physical constants for phase 4
 
 
 class Siren(nn.Module):
@@ -431,7 +432,7 @@ class Model_hard_phase3(nn.Module):
         if self.debug_mode is True:
             print(f"[During fwd] network output before transform (N) -> Min: {N.min().item()}, Max: {N.max().item()}")
             print(f"[During fwd] N_prime (dN/dnorm_inp, then take wrt x) -> Min: {N_prime.min().item()}, Max: {N_prime.max().item()}")
-        
+
         Phi = phi_w_transform(x=x, N=N, N_prime=N_prime, params=self.params)
         if self.debug_mode is True:
             print(f"[During fwd] phi (exp(w)) -> Min: {Phi.min().item()}, Max: {Phi.max().item()}")
@@ -443,6 +444,195 @@ class Model_hard_phase3(nn.Module):
             #print(f"[During fwd] phi_0 -> Min: {Phi_0.min().item()}, Max: {Phi_0.max().item()}")
             if (Phi_0 < 0).any() and self.debug_mode is True:
                 print("[During fwd] Watch out: phi_0 is negative.")
+            Phi = Phi + Phi_0
+
+        return Phi
+
+
+class Model_hard_phase4(nn.Module):
+    """
+    Phase 4: Temperature-dependent Thomas-Fermi model.
+
+    Inputs: x in [0,1], alpha (~1 to 100), T_kV (0.1 to 100 keV). Output: Psi(x).
+
+    Hard constraint: transform to ensure 2 constraints:
+     - Psi(0) = 1
+     - Psi(1) = Psi'(1)
+    Transform: w(x) = 0.5*x^2 + x*(2-x)*N + x*(1-x)*N'
+               Psi(x) = exp(w(x)), enforces positivity
+
+    Network receives (controlled by params.inp_dim):
+     - inp_dim=3: [x, norm_alpha, norm_T]
+     - inp_dim=4: [x, norm_alpha, norm_T, sqrt(x)]
+    """
+
+    def __init__(self, params):
+        super().__init__()
+        # Get hyperparameters from config
+        hidden = params.hidden
+        layers = params.nlayers
+        w0 = params.w0
+        activation = params.activation
+        self.k_val = params.k_val
+        self.add_phi0 = params.add_phi0
+
+        in_dim = params.inp_dim  # 3: [x, norm_alpha, norm_T] or 4: [x, norm_alpha, norm_T, sqrt_x]
+        self.inp_dim = in_dim  # Store for forward()
+        self.first = nn.Linear(in_dim, hidden)
+        self.hiddens = nn.ModuleList(
+            [nn.Linear(hidden, hidden) for _ in range(layers-2)])
+        self.out = nn.Linear(hidden, 1)
+
+        # Initialize activation function
+        if activation == "SiLU":
+            act = nn.SiLU()
+        elif activation == "Tanh":
+            act = nn.Tanh()
+        elif activation == "Mish":
+            act = nn.Mish()
+        elif activation == "Identity":
+            act = nn.Identity()
+        elif activation == "ReLU":
+            act = nn.ReLU()
+        elif activation == "SIREN":
+            act = Siren(w0=w0)
+            # Siren init
+            siren_init(self.first, w0=w0, is_first=True)
+            for h in self.hiddens:
+                siren_init(h, w0=w0, is_first=False)
+        else:
+            raise ValueError(
+                f"Unknown activation: {activation}. Choose from: SiLU, Identity, ReLU, SIREN, Tanh, Mish")
+
+        self.act = act
+        nn.init.zeros_(self.out.weight)
+        nn.init.zeros_(self.out.bias)
+
+        # Alpha normalization (same as phase 2/3)
+        norm_mode = params.norm_mode
+        if norm_mode == "standardize":
+            std_mean = getattr(params, "standard_mean", None)
+            std_std = getattr(params, "standard_std", None)
+            init_mean = torch.tensor(0.0) if std_mean is None else torch.tensor(float(std_mean))
+            init_std = torch.tensor(1.0) if std_std is None else torch.tensor(float(std_std))
+            self.register_buffer("a_mean", init_mean)
+            self.register_buffer("a_std", init_std)
+        elif norm_mode == "minmax":
+            self.register_buffer("a_min", torch.tensor(params.minmax_min))
+            self.register_buffer("a_max", torch.tensor(params.minmax_max))
+        else:
+            raise ValueError("norm_mode must be 'standardize' or 'minmax'")
+
+        # Temperature normalization (new for phase 4)
+        if norm_mode == "standardize":
+            # Try T_mean/T_std first (from main.py), fallback to T_standard_mean/T_standard_std
+            T_mean_val = getattr(params, "T_mean", None)
+            T_std_val = getattr(params, "T_std", None)
+            init_T_mean = torch.tensor(0.0) if T_mean_val is None else torch.tensor(float(T_mean_val))
+            init_T_std = torch.tensor(1.0) if T_std_val is None else torch.tensor(float(T_std_val))
+            self.register_buffer("T_mean", init_T_mean)
+            self.register_buffer("T_std", init_T_std)
+        elif norm_mode == "minmax":
+            self.register_buffer("T_min", torch.tensor(getattr(params, "T_minmax_min", -1.0)))
+            self.register_buffer("T_max", torch.tensor(getattr(params, "T_minmax_max", 1.0)))
+
+        self.norm_mode = norm_mode
+        self.debug_mode = getattr(params, "debug_mode", False)
+        self.params = params
+
+    def scale_alpha(self, alpha):
+        """Normalize alpha using log1p + standardize/minmax."""
+        a = torch.log1p(alpha)
+
+        if self.norm_mode == "standardize":
+            normalised = (a - self.a_mean) / (self.a_std + 1e-8)
+        elif self.norm_mode == "minmax":
+            a_mm = (a - self.a_min) / (self.a_max - self.a_min + 1e-12)
+            normalised = 2.0 * a_mm - 1.0
+        else:
+            normalised = a
+            print("Warning: incorrect norm_mode")
+
+        return normalised
+
+    def scale_T(self, T_kV):
+        """Normalize temperature using log1p + standardize/minmax."""
+        t = torch.log1p(T_kV)
+
+        if self.norm_mode == "standardize":
+            normalised = (t - self.T_mean) / (self.T_std + 1e-8)
+        elif self.norm_mode == "minmax":
+            t_mm = (t - self.T_min) / (self.T_max - self.T_min + 1e-12)
+            normalised = 2.0 * t_mm - 1.0
+        else:
+            normalised = t
+            print("Warning: incorrect norm_mode")
+
+        return normalised
+
+    def forward(self, inputs):
+        """
+        Args:
+            inputs: shape [N, 3] with columns [x, alpha, T_kV]
+
+        Computes sqrt(x), normalizes alpha and T, then passes 4 inputs to network.
+
+        Returns:
+            Psi: shape [N, 1]
+        """
+        x = inputs[:, 0:1]
+        alpha = inputs[:, 1:2]
+        T_kV = inputs[:, 2:3]
+
+        norm_alpha = self.scale_alpha(alpha)
+        norm_T = self.scale_T(T_kV)
+
+        if self.debug_mode:
+            # Debug: check raw vs normalized statistics
+            print(f"[Phase4 fwd] x: min={x.min().item():.6g}, max={x.max().item():.6g}")
+            print(f"[Phase4 fwd] alpha: mean={alpha.mean().item():.6g}, std={alpha.std().item():.6g}")
+            print(f"[Phase4 fwd] norm_alpha: mean={norm_alpha.mean().item():.6g}, std={norm_alpha.std().item():.6g}")
+            print(f"[Phase4 fwd] T_kV: mean={T_kV.mean().item():.6g}, std={T_kV.std().item():.6g}")
+            print(f"[Phase4 fwd] norm_T: mean={norm_T.mean().item():.6g}, std={norm_T.std().item():.6g}")
+
+        # Build network input based on inp_dim
+        # inp_dim=3: [x, norm_alpha, norm_T]
+        # inp_dim=4: [x, norm_alpha, norm_T, sqrt_x]
+        if self.inp_dim == 4:
+            sqrt_x = torch.sqrt(x)
+            network_inp = torch.cat([x, norm_alpha, norm_T, sqrt_x], dim=-1)
+        else:
+            network_inp = torch.cat([x, norm_alpha, norm_T], dim=-1)
+
+        h = self.act(self.first(network_inp))
+        for layer in self.hiddens:
+            h = self.act(layer(h))
+        N = self.out(h)
+
+        # Compute N' w.r.t. x (need grad through original inputs for PDE loss)
+        N_prime = first_deriv_auto(N, inputs, var1=0)
+
+        if self.debug_mode:
+            print(f"[Phase4 fwd] N: min={N.min().item():.6g}, max={N.max().item():.6g}")
+            print(f"[Phase4 fwd] N_prime: min={N_prime.min().item():.6g}, max={N_prime.max().item():.6g}")
+
+        # Apply w-transform: w = 0.5*x^2 + x*(2-x)*N + x*(1-x)*N'
+        # Then Psi = exp(w) to ensure positivity
+        Phi = phi_w_transform(x=x, N=N, N_prime=N_prime, params=self.params)
+
+        if self.debug_mode:
+            print(f"[Phase4 fwd] Phi (exp(w)): min={Phi.min().item():.6g}, max={Phi.max().item():.6g}")
+
+        if (Phi < 0).any() and self.debug_mode:
+            print("[Phase4 fwd] Warning: Phi is negative (should not happen with exp transform)")
+
+        # Optional phi_0 term (physics-informed initialization)
+        if self.add_phi0:
+            Phi_0 = phi_0_transform(x=x, alpha=alpha, k=self.k_val)
+            if self.debug_mode:
+                print(f"[Phase4 fwd] Phi_0: min={Phi_0.min().item():.6g}, max={Phi_0.max().item():.6g}")
+            if (Phi_0 < 0).any() and self.debug_mode:
+                print("[Phase4 fwd] Warning: Phi_0 is negative")
             Phi = Phi + Phi_0
 
         return Phi

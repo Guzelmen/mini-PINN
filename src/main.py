@@ -71,6 +71,17 @@ def run_training(params):
                 f"[norm] Train standardize log1p(alpha): mean={a_mean:.6g}, std={a_std:.6g}"
             )
 
+            # Phase 4: Also compute T normalization stats
+            if int(params.phase) == 4:
+                train_log_T = torch.log1p(X_train[:, 2:3])
+                T_mean = float(train_log_T.mean().item())
+                T_std = float(train_log_T.std(unbiased=False).item())
+                params.T_mean = T_mean
+                params.T_std = T_std
+                print(
+                    f"[norm] Train standardize log1p(T): mean={T_mean:.6g}, std={T_std:.6g}"
+                )
+
             # Log diagnostics for val/test (raw and standardized with train stats)
             diag = {
                 "norm/train_log1p_alpha_mean": float(train_log_alpha.mean().item()),
@@ -95,6 +106,23 @@ def run_training(params):
                     f"{diag['norm/val_log1p_alpha_stdzd_std']:.6g})"
                 )
 
+                # Phase 4: Val T diagnostics
+                if int(params.phase) == 4:
+                    val_log_T = torch.log1p(X_val[:, 2:3])
+                    val_T_stdzd = (val_log_T - T_mean) / (T_std + 1e-12)
+                    diag.update({
+                        "norm/val_log1p_T_mean": float(val_log_T.mean().item()),
+                        "norm/val_log1p_T_std": float(val_log_T.std(unbiased=False).item()),
+                        "norm/val_log1p_T_stdzd_mean": float(val_T_stdzd.mean().item()),
+                        "norm/val_log1p_T_stdzd_std": float(val_T_stdzd.std(unbiased=False).item()),
+                    })
+                    print(
+                        f"[norm] Val log1p(T): mean={diag['norm/val_log1p_T_mean']:.6g}, "
+                        f"std={diag['norm/val_log1p_T_std']:.6g} | "
+                        f"stdzd(mean,std)=({diag['norm/val_log1p_T_stdzd_mean']:.6g}, "
+                        f"{diag['norm/val_log1p_T_stdzd_std']:.6g})"
+                    )
+
             if X_test is not None:
                 test_log_alpha = torch.log1p(X_test[:, 1:2])
                 test_stdzd = (test_log_alpha - a_mean) / (a_std + 1e-12)
@@ -111,17 +139,36 @@ def run_training(params):
                     f"{diag['norm/test_log1p_alpha_stdzd_std']:.6g})"
                 )
 
+                # Phase 4: Test T diagnostics
+                if int(params.phase) == 4:
+                    test_log_T = torch.log1p(X_test[:, 2:3])
+                    test_T_stdzd = (test_log_T - T_mean) / (T_std + 1e-12)
+                    diag.update({
+                        "norm/test_log1p_T_mean": float(test_log_T.mean().item()),
+                        "norm/test_log1p_T_std": float(test_log_T.std(unbiased=False).item()),
+                        "norm/test_log1p_T_stdzd_mean": float(test_T_stdzd.mean().item()),
+                        "norm/test_log1p_T_stdzd_std": float(test_T_stdzd.std(unbiased=False).item()),
+                    })
+                    print(
+                        f"[norm] Test log1p(T): mean={diag['norm/test_log1p_T_mean']:.6g}, "
+                        f"std={diag['norm/test_log1p_T_std']:.6g} | "
+                        f"stdzd(mean,std)=({diag['norm/test_log1p_T_stdzd_mean']:.6g}, "
+                        f"{diag['norm/test_log1p_T_stdzd_std']:.6g})"
+                    )
+
             # Ensure these derived params/diagnostics get into wandb (initial config update happened earlier)
             try:
-                wandb.config.update(
-                    {
-                        "norm_mode": params.norm_mode,
-                        "standard_mean": params.standard_mean,
-                        "standard_std": params.standard_std,
-                        **diag,
-                    },
-                    allow_val_change=True,
-                )
+                wandb_update = {
+                    "norm_mode": params.norm_mode,
+                    "standard_mean": params.standard_mean,
+                    "standard_std": params.standard_std,
+                    **diag,
+                }
+                # Phase 4: Include T normalization params
+                if int(params.phase) == 4:
+                    wandb_update["T_mean"] = params.T_mean
+                    wandb_update["T_std"] = params.T_std
+                wandb.config.update(wandb_update, allow_val_change=True)
             except Exception:
                 pass
     except Exception as e:
@@ -208,69 +255,63 @@ def run_training(params):
         # train the model
         trainer(model, train_loader, val_loader, params)
         
-        # Unified output directory for all diagnostic plots
-        # If in sweep mode, organize under sweep_name subfolder
-        sweep_name = getattr(params, "sweep_name", None)
-        if sweep_name:
-            output_dir = f"{params.plot_dir}/newfiles/{sweep_name}/{params.run_name}"
-            pkl_file = PROJECT_ROOT / params.pred_dir / f"{params.n_vars}D" / sweep_name / f"{params.run_name}.pkl"
-        else:
-            output_dir = f"{params.plot_dir}/newfiles/{params.run_name}"
-            pkl_file = PROJECT_ROOT / params.pred_dir / f"{params.n_vars}D" / f"{params.run_name}.pkl"
-        
-        # plot predictions from saved pickle (evolution over epochs)
+        # Plotting (only if plot_auto is True)
         if params.plot_auto:
+            # Unified output directory for all diagnostic plots
+            output_dir = f"{params.plot_dir}/phase{params.phase}/{params.run_name}"
+
+            # plot predictions from saved pickle (evolution over epochs)
+            pkl_file = PROJECT_ROOT / params.pred_dir / f"phase{params.phase}" / f"{params.run_name}.pkl"
             ev.plot_pred_only(filepath=pkl_file, params=params, output_dir=output_dir)
-        
-        # Additional diagnostic plots using the trained model directly
-        print("[main] Generating post-training diagnostic plots...")
-        device = torch.device("cpu")  # Training runs on CPU
-        
-        # Enable gradients for computing residuals (need second derivatives)
-        torch.set_grad_enabled(True)
-        model.eval()
-        
-        # Build grid: 200x200 points in (x, alpha) space
-        n_grid = 200
-        log_x_plots = "logx" in params.data_path or "LOG500x" in params.data_path or "log_x" in params.data_path
-        max_alpha = (100 if "RED" in params.data_path else 1000)
-    
-        X_grid, A_grid, inputs = build_grid(
-            n=n_grid,
-            device=device,
-            log_x=log_x_plots,
-            log_alpha=True,
-            min_alpha=1,
-            max_alpha=max_alpha
-        )
-        
-        # Forward pass
-        outputs = model(inputs)
-        
-        # 1. Simple prediction plot: psi(x) vs x
-        simple_plot_latest_epoch_only(
-            outputs=outputs,
-            inputs=inputs,
-            run_name=params.run_name,
-            output_dir=output_dir,
-            log_x=log_x_plots,
-            log_alpha=True,
-        )
-        
-        # 2. Colormap of residual^2 over (x, alpha)
-        residual_sq = compute_pointwise_residual_sq(outputs, inputs)
-        plot_and_save_colormap(
-            X_grid=X_grid,
-            A_grid=A_grid,
-            residual_sq=residual_sq,
-            run_name=params.run_name,
-            output_dir=output_dir,
-            n=n_grid,
-            log_x=log_x_plots,
-            log_alpha=True,
-        )
-        
-        print("[main] All diagnostic plots complete.")
+
+            # Additional diagnostic plots using the trained model directly
+            print("[main] Generating post-training diagnostic plots...")
+            device = torch.device("cpu")  # Training runs on CPU
+
+            # Enable gradients for computing residuals (need second derivatives)
+            torch.set_grad_enabled(True)
+            model.eval()
+
+            # Build grid: 200x200 points in (x, alpha) space
+            n_grid = 200
+            log_x_plots = "logx" in params.data_path or "LOG500x" in params.data_path or "log_x" in params.data_path
+            max_alpha = (100 if "RED" in params.data_path else 1000)
+            X_grid, A_grid, inputs = build_grid(
+                n=n_grid,
+                device=device,
+                log_x=log_x_plots,
+                log_alpha=True,
+                min_alpha=1,
+                max_alpha=max_alpha
+            )
+
+            # Forward pass
+            outputs = model(inputs)
+
+            # 1. Simple prediction plot: psi(x) vs x
+            simple_plot_latest_epoch_only(
+                outputs=outputs,
+                inputs=inputs,
+                run_name=params.run_name,
+                output_dir=output_dir,
+                log_x=log_x_plots,
+                log_alpha=True,
+            )
+
+            # 2. Colormap of residual^2 over (x, alpha)
+            residual_sq = compute_pointwise_residual_sq(outputs, inputs)
+            plot_and_save_colormap(
+                X_grid=X_grid,
+                A_grid=A_grid,
+                residual_sq=residual_sq,
+                run_name=params.run_name,
+                output_dir=output_dir,
+                n=n_grid,
+                log_x=log_x_plots,
+                log_alpha=True,
+            )
+
+            print("[main] All diagnostic plots complete.")
 
     elif params.stage == "test":
         # Load the latest checkpoint weights into the already-constructed model.
@@ -305,20 +346,16 @@ def main():
     parser.add_argument("--config", required=False, help="Config file name (for regular training)")
     parser.add_argument("--sweep", required=False, help="Sweep ID (for sweep mode)")
     parser.add_argument("--base_config", required=False, help="Base config name (for sweep mode)")
-    parser.add_argument("--sweep_name", required=False, help="Sweep name for organizing output files (for sweep mode)")
     args = parser.parse_args()
 
     # Check if running in sweep mode
     sweep_id = args.sweep or os.environ.get("SWEEP_ID")
     base_config_name = args.base_config or os.environ.get("BASE_CONFIG")
-    sweep_name = args.sweep_name or os.environ.get("SWEEP_NAME")
     
     if sweep_id:
         # Sweep mode
         if not base_config_name:
             raise ValueError("BASE_CONFIG required when running in sweep mode. Use --base_config or set BASE_CONFIG env var.")
-        if not sweep_name:
-            raise ValueError("SWEEP_NAME required when running in sweep mode. Use --sweep_name or set SWEEP_NAME env var.")
         
         wandb.login()
         
@@ -347,11 +384,8 @@ def main():
                     print(f"Sweep override: {key} = {value}")
             
             # Generate unique run name for sweep and update wandb run name
-            params.run_name = f"run_{run.id[:8]}"
+            params.run_name = f"{params.run_name}_sweep_{run.id[:8]}"
             run.name = params.run_name  # Update the wandb run name
-            
-            # Set sweep_name on params for file path organization
-            params.sweep_name = sweep_name
             
             # Continue with training
             run_training(params)

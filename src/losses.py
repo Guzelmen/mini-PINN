@@ -1,5 +1,6 @@
 import torch
 from .utils import sec_deriv_auto, first_deriv_auto, fmt_series
+from .fd_integrals import fermi_dirac_half, compute_lambda, compute_gamma, B_M, C0_M
 import math
 
 
@@ -542,3 +543,168 @@ def compute_fmt_loss_phase2(model, inputs, outputs, params):
     # Apply mask then average across the batch
     lossfmt = torch.mean(se * mask)
     return lossfmt
+
+
+# =========================
+# Phase 4 losses (Temperature-dependent Thomas-Fermi)
+# =========================
+
+def compute_residual_loss_phase4(outputs, inputs, params, val_stage: bool = False):
+    """
+    Temperature-dependent Thomas-Fermi residual for phase 4:
+
+        d²ψ/dx² - (λ³/γ) · x · I_{1/2}(γψ/(λx)) = 0
+
+    where:
+        λ = α · b · T_kV^(1/4) / c₀
+        γ = 0.0899 · Z / T_kV^(3/4)  (Z=1 for hydrogen)
+        I_{1/2} is the Fermi-Dirac integral of order 1/2 (unnormalized)
+
+    At T→0, this reduces to the standard T=0 Thomas-Fermi equation:
+        d²ψ/dx² = α^(3/2) · ψ^(3/2) / x^(1/2)
+
+    Args:
+        outputs: ψ(x) predictions, shape [batch, 1]
+        inputs: [batch, 3] with columns [x, alpha, T_kV]
+        params: config with debug_mode, loss_type, etc.
+        val_stage: if True, skip m-weighted loss variant
+
+    Returns:
+        residual loss: mean squared residual over the batch
+    """
+    # Extract inputs
+    x = inputs[:, 0:1]
+    alpha = inputs[:, 1:2]
+    T_kV = inputs[:, 2:3]
+
+    # Compute second derivative d²ψ/dx²
+    d2psi_dx2 = sec_deriv_auto(outputs, inputs, var1=0, var2=0)
+
+    # Model output is ψ(x)
+    if len(outputs.shape) == 2 and outputs.shape[1] == 1:
+        psi = outputs
+    elif len(outputs.shape) == 1:
+        psi = outputs.unsqueeze(1)
+    else:
+        psi = outputs
+
+    # Compute λ and γ
+    lam = compute_lambda(alpha, T_kV)  # λ = α * b * T^(1/4) / c0
+    gamma = compute_gamma(T_kV, Z=1)   # γ = 0.0899 / T^(3/4) for Z=1
+
+    # Debug output
+    if getattr(params, "debug_mode", False):
+        print(f"[Phase4 loss] x: min={x.min().item():.6g}, max={x.max().item():.6g}")
+        print(f"[Phase4 loss] alpha: min={alpha.min().item():.6g}, max={alpha.max().item():.6g}")
+        print(f"[Phase4 loss] T_kV: min={T_kV.min().item():.6g}, max={T_kV.max().item():.6g}")
+        print(f"[Phase4 loss] λ: min={lam.min().item():.6g}, max={lam.max().item():.6g}")
+        print(f"[Phase4 loss] γ: min={gamma.min().item():.6g}, max={gamma.max().item():.6g}")
+        print(f"[Phase4 loss] ψ: min={psi.min().item():.6g}, max={psi.max().item():.6g}")
+        print(f"[Phase4 loss] d²ψ/dx²: min={d2psi_dx2.min().item():.6g}, max={d2psi_dx2.max().item():.6g}")
+
+    # Compute argument to FD integral: η = γψ/(λx)
+    # Add small epsilon to avoid division by zero near x=0
+    eta = gamma * psi / (lam * x + 1e-12)
+
+    if getattr(params, "debug_mode", False):
+        print(f"[Phase4 loss] η (FD arg): min={eta.min().item():.6g}, max={eta.max().item():.6g}")
+
+    # Compute FD integral I_{1/2}(η)
+    fd_half = fermi_dirac_half(eta)
+
+    if getattr(params, "debug_mode", False):
+        print(f"[Phase4 loss] I_{{1/2}}(η): min={fd_half.min().item():.6g}, max={fd_half.max().item():.6g}")
+
+    # PDE residual: d²ψ/dx² - (λ³/γ) · x · I_{1/2}(η) = 0
+    coeff = (lam ** 3) / gamma
+    rhs = coeff * x * fd_half
+    residual = d2psi_dx2 - rhs
+
+    if getattr(params, "debug_mode", False):
+        print(f"[Phase4 loss] coeff (λ³/γ): min={coeff.min().item():.6g}, max={coeff.max().item():.6g}")
+        print(f"[Phase4 loss] RHS: min={rhs.min().item():.6g}, max={rhs.max().item():.6g}")
+        print(f"[Phase4 loss] residual: min={residual.min().item():.6g}, max={residual.max().item():.6g}")
+
+    # Check for negative psi (should not happen with exp transform)
+    if (psi < 0).any() and getattr(params, "debug_mode", False):
+        print("[Phase4 loss] Warning: ψ is negative in some samples")
+
+    # Compute loss
+    if params.loss_type == "mse":
+        loss = torch.mean(residual ** 2)
+    else:
+        raise ValueError(f"Unknown loss_type: {params.loss_type}")
+
+    return loss
+
+
+def compute_bc_loss_1_phase4(outputs, inputs):
+    """
+    Enforce Robin BC at x=1: ψ'(1) = ψ(1)
+    Same as phase 2 (T-independent boundary condition).
+    """
+    return compute_bc_loss_1_phase1(outputs, inputs)
+
+
+def compute_bc_loss_2_phase4(outputs, inputs):
+    """
+    Enforce Dirichlet BC at x=0: ψ(0) = 1
+    Same as phase 2 (T-independent boundary condition).
+    """
+    return compute_bc_loss_2_phase1(outputs, inputs)
+
+
+class LossWeighter_phase4:
+    """
+    Handles loss weighting for Phase 4 (temperature-dependent TF).
+    Mirrors Phase 2 behavior.
+    """
+
+    def __init__(self, params):
+        self.mode = params.mode  # "soft" or "hard"
+        self.strategy = params.loss_strategy  # "fixed" or "adaptive"
+
+        if self.mode == "hard":
+            self.residual_weight = 1.0
+            self.bc_1_weight = 0.0
+            self.bc_2_weight = 0.0
+        else:
+            self.residual_weight = params.relative_weights["residual"]
+            self.bc_1_weight = params.relative_weights["bc_1"]
+            self.bc_2_weight = params.relative_weights["bc_2"]
+
+    def update_weights(self, loss_dict):
+        if self.strategy == 'adaptive' and self.mode == 'soft':
+            loss_mags = {}
+            for key in ["residual", "bc_1", "bc_2"]:
+                if key in loss_dict:
+                    loss_mag = loss_dict[key].detach().item()
+                    loss_mags[key] = max(loss_mag, 1e-8)
+
+            if not loss_mags:
+                return
+
+            avg_mag = sum(loss_mags.values()) / len(loss_mags)
+
+            if "residual" in loss_mags:
+                self.residual_weight = avg_mag / loss_mags["residual"]
+            if "bc_1" in loss_mags:
+                self.bc_1_weight = avg_mag / loss_mags["bc_1"]
+            if "bc_2" in loss_mags:
+                self.bc_2_weight = avg_mag / loss_mags["bc_2"]
+
+    def get_weighted_loss(self, loss_dict):
+        total = 0.0
+        if "residual" in loss_dict:
+            total += self.residual_weight * loss_dict["residual"]
+        if self.mode == "soft":
+            if "bc_1" in loss_dict:
+                total += self.bc_1_weight * loss_dict["bc_1"]
+            if "bc_2" in loss_dict:
+                total += self.bc_2_weight * loss_dict["bc_2"]
+        return total
+
+
+def compute_total_loss_phase4(loss_dict, weighter):
+    """Compute total weighted loss for phase 4."""
+    return weighter.get_weighted_loss(loss_dict)

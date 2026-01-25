@@ -180,5 +180,105 @@ def generate_logx_logr0(out_path=PROJECT_ROOT / "data/phase_2_log_x_log_alpha_64
     torch.save(X, out_path)
     print(f"Saved tensor of shape {tuple(X.shape)} to {out_path}")
 
+def generate_phase4_combo(out_path=PROJECT_ROOT / "data/phase_4_all_log_160x_40alpha_40T.pt",
+                          seed=42, n_x=160, n_alpha=40, n_T=40):
+    """
+    Generate dataset for Phase 4 (temperature-dependent Thomas-Fermi).
+
+    Creates Cartesian product of x, alpha, T values:
+        - x: logspace from 1e-6 to 1.0 (n_x points)
+        - alpha: computed from r0 in [5e-11, 5e-9] m (n_alpha points)
+        - T: logspace from 0.1 to 100 keV (n_T points)
+
+    Total points: n_x * n_alpha * n_T = 160 * 40 * 40 = 256,000
+
+    Output shape: [N, 3] with columns [x, alpha, T_kV]
+    """
+    torch.manual_seed(seed)
+
+    # x: logspace from 1e-6 to 1.0
+    x = torch.logspace(math.log10(1e-6), math.log10(1.0), steps=n_x).unsqueeze(1)
+
+    # alpha: from r0 range, same as phase 2/3
+    r0 = torch.logspace(math.log10(5e-11), math.log10(5e-9), steps=n_alpha).unsqueeze(1)
+    a0 = 5.291772105e-11  # Bohr radius in meters
+    b = 0.25 * (4.5 * math.pi**2)**(1/3) * a0
+    alpha = r0 / b
+
+    # T: logspace from 0.1 to 100 keV
+    T_kV = torch.logspace(math.log10(0.1), math.log10(100.0), steps=n_T).unsqueeze(1)
+
+    # Build Cartesian product: [n_x * n_alpha * n_T, 3]
+    # Order: for each T, for each alpha, all x values
+    Nx, Na, Nt = x.shape[0], alpha.shape[0], T_kV.shape[0]
+    total_points = Nx * Na * Nt
+
+    # Repeat patterns to create full Cartesian product
+    # x repeats: Na * Nt times (outer loop)
+    xT = x.repeat(Na * Nt, 1)  # [Nx * Na * Nt, 1]
+
+    # alpha: repeat each value Nx times, then repeat the whole pattern Nt times
+    alphaT = alpha.repeat_interleave(Nx, dim=0).repeat(Nt, 1)  # [Nx * Na * Nt, 1]
+
+    # T: repeat each value (Nx * Na) times
+    T_kvT = T_kV.repeat_interleave(Nx * Na, dim=0)  # [Nx * Na * Nt, 1]
+
+    X = torch.cat([xT, alphaT, T_kvT], dim=1)  # [N, 3] = [x, alpha, T_kV]
+
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    torch.save(X, out_path)
+    print(f"Saved Phase 4 tensor of shape {tuple(X.shape)} to {out_path}")
+    print(f"  x: {n_x} points in logspace [1e-6, 1.0]")
+    print(f"  alpha: {n_alpha} points from r0 in [5e-11, 5e-9] m")
+    print(f"  T: {n_T} points in logspace [0.1, 100] keV")
+    print(f"  Total: {X.shape[0]} points")
+    
+
+def generate_phase4_small(out_path=PROJECT_ROOT / "data/phase_4_small_range.pt",
+                          seed=42, n_x=160, n_alpha=40, n_T=40):
+    """
+    Generate dataset for Phase 4 with SMALL alpha and T ranges.
+
+    This reduces the coefficient λ³/γ from ~10¹¹ to ~10³, making training feasible.
+
+    Creates Cartesian product of x, alpha, T values:
+        - x: logspace from 1e-4 to 1.0 (avoid extreme small x)
+        - alpha: small range ~1-5 (r0 ~ 5e-11 to 2.5e-10 m)
+        - T: narrow range 1-10 keV (not 0.1-100)
+
+    Total points: n_x * n_alpha * n_T = 160 * 40 * 40 = 256,000
+    """
+    torch.manual_seed(seed)
+
+    # x: logspace from 1e-4 to 1.0 (avoid extreme small x where η blows up)
+    x = torch.logspace(math.log10(1e-4), math.log10(1.0), steps=n_x).unsqueeze(1)
+
+    # alpha: small range (r0 from 5e-11 to 2.5e-10 m -> alpha ~ 1 to 5)
+    r0 = torch.logspace(math.log10(5e-11), math.log10(2.5e-10), steps=n_alpha).unsqueeze(1)
+    a0 = 5.291772105e-11  # Bohr radius in meters
+    b = 0.25 * (4.5 * math.pi**2)**(1/3) * a0
+    alpha = r0 / b
+
+    # T: narrow range 1 to 10 keV (reduces γ variation)
+    T_kV = torch.logspace(math.log10(1.0), math.log10(10.0), steps=n_T).unsqueeze(1)
+
+    # Build Cartesian product
+    Nx, Na, Nt = x.shape[0], alpha.shape[0], T_kV.shape[0]
+
+    xT = x.repeat(Na * Nt, 1)
+    alphaT = alpha.repeat_interleave(Nx, dim=0).repeat(Nt, 1)
+    T_kvT = T_kV.repeat_interleave(Nx * Na, dim=0)
+
+    X = torch.cat([xT, alphaT, T_kvT], dim=1)
+
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    torch.save(X, out_path)
+    print(f"Saved Phase 4 (small range) tensor of shape {tuple(X.shape)} to {out_path}")
+    print(f"  x: {n_x} points in logspace [1e-4, 1.0]")
+    print(f"  alpha: {n_alpha} points (~1 to 5)")
+    print(f"  T: {n_T} points in logspace [1, 10] keV")
+    print(f"  Total: {X.shape[0]} points")
+
+
 if __name__ == "__main__":
-    generate_phase2_combo()
+    generate_phase4_small()

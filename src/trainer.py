@@ -110,6 +110,8 @@ def trainer(
     # Initialize LossWeighter
     if params.phase == 3:
         weighter_name = f"LossWeighter_phase2"
+    elif params.phase == 4:
+        weighter_name = f"LossWeighter_phase4"
     else:
         weighter_name = f"LossWeighter_phase{params.phase}"
     Weighterclass = getattr(losses, weighter_name)
@@ -191,6 +193,7 @@ def trainer(
 
         epoch_x = []
         epoch_alpha = []
+        epoch_T = []  # For phase 4 temperature
         epoch_outputs = []
         epoch_d2check = []
 
@@ -222,6 +225,9 @@ def trainer(
             inputs.requires_grad_(True)
             x = inputs[:, 0:1].clone()
             alpha = inputs[:, 1:2].clone()
+            # Extract T for phase 4
+            if params.phase == 4:
+                T = inputs[:, 2:3].clone()
 
             # Forward pass
             outputs = model(inputs)
@@ -233,12 +239,16 @@ def trainer(
                 d2check = (d2outdx2 * factor)**(2/3)
                 epoch_x.append(x.detach())
                 epoch_alpha.append(alpha.detach())
+                if params.phase == 4:
+                    epoch_T.append(T.detach())
                 epoch_outputs.append(outputs.detach())
                 epoch_d2check.append(d2check.detach())
 
             # Compute individual losses
             if params.phase == 3:
                 residual_name = f"compute_residual_loss_phase2"
+            elif params.phase == 4:
+                residual_name = f"compute_residual_loss_phase4"
             else:
                 residual_name = f"compute_residual_loss_phase{params.phase}"
             residual_fn = getattr(losses, residual_name)
@@ -251,8 +261,13 @@ def trainer(
                 fmt_loss = torch.tensor(0.0, device=outputs.device)
 
             if params.mode == "soft":
-                bc1name = f"compute_bc_loss_1_phase{params.phase}"
-                bc2name = f"compute_bc_loss_2_phase{params.phase}"
+                # Phase 4 reuses phase 1 BC functions (BCs are T-independent)
+                if params.phase == 4:
+                    bc1name = f"compute_bc_loss_1_phase4"
+                    bc2name = f"compute_bc_loss_2_phase4"
+                else:
+                    bc1name = f"compute_bc_loss_1_phase{params.phase}"
+                    bc2name = f"compute_bc_loss_2_phase{params.phase}"
                 bc1_fn = getattr(losses, bc1name)
                 bc2_fn = getattr(losses, bc2name)
                 bc_1_loss = bc1_fn(outputs, inputs)
@@ -282,6 +297,8 @@ def trainer(
             
             if params.phase == 3:
                 totlossname = f"compute_total_loss_phase2"
+            elif params.phase == 4:
+                totlossname = f"compute_total_loss_phase4"
             else:
                 totlossname = f"compute_total_loss_phase{params.phase}"
             totloss_fn = getattr(losses, totlossname)
@@ -345,9 +362,14 @@ def trainer(
             d2check_all = torch.cat(epoch_d2check, dim=0).cpu().numpy()
 
             predictions[ep] = {"x": x_all,
-                               "alpha": alpha_all, 
+                               "alpha": alpha_all,
                                "outputs": outputs_all,
                                "d2_check": d2check_all}
+
+            # Include T for phase 4
+            if params.phase == 4 and len(epoch_T) > 0:
+                T_all = torch.cat(epoch_T, dim=0).cpu().numpy()
+                predictions[ep]["T"] = T_all
 
             print(
                 f"Saved epoch {ep} predictions")
@@ -393,11 +415,17 @@ def trainer(
             x0 = torch.zeros_like(alpha_check) + 1e-10
             x1 = torch.ones_like(alpha_check)
 
-            inp0 = torch.cat([x0, alpha_check], dim=-1).requires_grad_(True)
-            inp1 = torch.cat([x1, alpha_check], dim=-1).requires_grad_(True)
+            if params.phase == 4:
+                # Phase 4 has 3 inputs: [x, alpha, T]
+                T_check = torch.tensor([[10.0]])  # Use 10 keV as test temperature
+                inp0 = torch.cat([x0, alpha_check, T_check], dim=-1).requires_grad_(True)
+                inp1 = torch.cat([x1, alpha_check, T_check], dim=-1).requires_grad_(True)
+            else:
+                inp0 = torch.cat([x0, alpha_check], dim=-1).requires_grad_(True)
+                inp1 = torch.cat([x1, alpha_check], dim=-1).requires_grad_(True)
             psi0 = model(inp0)
             psi1 = model(inp1)
-            
+
             dpsi1_dx = first_deriv_auto(psi1, inp1)
 
             psi0_err = torch.abs(psi0 - 1.0).mean().item()
@@ -460,6 +488,8 @@ def trainer(
                 # Compute individual losses
                 if params.phase == 3:
                     residual_name = f"compute_residual_loss_phase2"
+                elif params.phase == 4:
+                    residual_name = f"compute_residual_loss_phase4"
                 else:
                     residual_name = f"compute_residual_loss_phase{params.phase}"
                 residual_fn = getattr(losses, residual_name)
@@ -471,8 +501,13 @@ def trainer(
                     fmt_loss = torch.tensor(0.0, device=outputs.device)
 
                 if params.mode == "soft":
-                    bc1name = f"compute_bc_loss_1_phase{params.phase}"
-                    bc2name = f"compute_bc_loss_2_phase{params.phase}"
+                    # Phase 4 reuses phase 1 BC functions (BCs are T-independent)
+                    if params.phase == 4:
+                        bc1name = f"compute_bc_loss_1_phase4"
+                        bc2name = f"compute_bc_loss_2_phase4"
+                    else:
+                        bc1name = f"compute_bc_loss_1_phase{params.phase}"
+                        bc2name = f"compute_bc_loss_2_phase{params.phase}"
                     bc1_fn = getattr(losses, bc1name)
                     bc2_fn = getattr(losses, bc2name)
                     bc_1_loss = bc1_fn(outputs, inputs)
@@ -522,24 +557,14 @@ def trainer(
         save_weights_every = getattr(params, "save_weights_every", None)
         save_weights = getattr(params, "save_weights", False)
         if save_weights is True and isinstance(save_weights_every, int) and save_weights_every > 0 and ep % save_weights_every == 0:
-            # If in sweep mode, organize under sweep_name subfolder
-            sweep_name = getattr(params, "sweep_name", None)
-            if sweep_name:
-                weights_dir = PROJECT_ROOT / "saving_weights" / sweep_name / f"{params.run_name}"
-            else:
-                weights_dir = PROJECT_ROOT / "saving_weights" / f"{params.run_name}"
+            weights_dir = PROJECT_ROOT / "saving_weights" / f"{params.run_name}"
             weights_dir.mkdir(parents=True, exist_ok=True)
             ckpt_path = weights_dir / f"weights_epoch_{ep}"
             torch.save(model.state_dict(), ckpt_path)
             print(f"Saved weights checkpoint to {ckpt_path}")
 
     if len(predictions) != 0:
-        # If in sweep mode, organize under sweep_name subfolder
-        sweep_name = getattr(params, "sweep_name", None)
-        if sweep_name:
-            save_path = PROJECT_ROOT / params.pred_dir / f"{params.n_vars}D" / sweep_name / f"{params.run_name}.pkl"
-        else:
-            save_path = PROJECT_ROOT / params.pred_dir / f"{params.n_vars}D" / f"{params.run_name}.pkl"
+        save_path = PROJECT_ROOT / params.pred_dir / f"phase{params.phase}" / f"{params.run_name}.pkl"
     
         # Ensure directory exists
         save_path.parent.mkdir(parents=True, exist_ok=True)
