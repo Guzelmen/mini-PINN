@@ -5,12 +5,12 @@ This module provides access to Fermi-Dirac integrals (F_{-1/2}, F_{1/2}, F_{3/2}
 using Fukushima's rational approximations, implemented in PyTorch with custom
 backward passes for automatic differentiation.
 
-Source: MinimalTFFDintPy repository by Aidan Sherlock
+Source: MinimalTFFDintPy repository by Aidan Crilly
 Location: /rds/general/user/gs1622/home/MinimalTFFDintPy
 
-IMPORTANT: The FMT paper (Feynman-Metropolis-Teller) uses UNNORMALIZED Fermi-Dirac
-integrals. The original Fukushima implementation divides by Gamma factors. We
-remove that normalization here to match FMT conventions:
+NOTE:
+From my derivations, to match the T=0, we shouldn't include the last normalisation with sqrt(pi).
+Removed that normalization here to match FMT conventions:
     - F_{1/2}(η) → (2/3) η^(3/2) as η → ∞  (NOT (4/3√π) η^(3/2))
 
 Physical constants for the temperature-dependent Thomas-Fermi equation:
@@ -55,7 +55,6 @@ from FDint_PyTorch import (
 def _fermi_dirac_minus_half_unnorm(x):
     """
     Compute F_{-1/2}(x) WITHOUT Gamma function normalization.
-    This matches FMT convention.
     """
     x1, x2, x3, x4, x5, x6, x7 = -2.0, 0.0, 2.0, 5.0, 10.0, 20.0, 40.0
 
@@ -133,7 +132,6 @@ def _fermi_dirac_half_unnorm(x):
 def _fermi_dirac_three_half_unnorm(x):
     """
     Compute F_{3/2}(x) WITHOUT Gamma function normalization.
-    This matches FMT convention.
     """
     x1, x2, x3, x4, x5, x6, x7 = -2.0, 0.0, 2.0, 5.0, 10.0, 20.0, 40.0
 
