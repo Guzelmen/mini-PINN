@@ -124,15 +124,27 @@ def load_data_and_norm(params):
 def load_data(params):
     """
     Load the pre-generated data from the PyTorch file, split into train/val/test sets.
+    
+    Supports two data formats:
+    1. Legacy format: raw tensor with shape [N, 2] or [N, 3]
+    2. Solver format: dict with {'inputs': [N, 3], 'targets': [N, 1]}
+    
+    When use_solver_data=True in params, expects solver format and returns targets.
 
     Args:
         params (dict): Parameters for the data loading
+            - data_path: path to .pt file
+            - use_solver_data: bool, if True expects {'inputs', 'targets'} format
+            - random_seed: seed for reproducible splits
 
     Returns:
         dict: Dictionary containing:
-            - 'train': training data tensor
-            - 'val': validation data tensor  
-            - 'test': test data tensor
+            - 'train': training inputs tensor
+            - 'val': validation inputs tensor  
+            - 'test': test inputs tensor
+            - 'train_targets': training targets tensor (if use_solver_data=True)
+            - 'val_targets': validation targets tensor (if use_solver_data=True)
+            - 'test_targets': test targets tensor (if use_solver_data=True)
     """
     # go to parent of this current folder and then into the data folder
     file_path = PROJECT_ROOT / str(params.data_path)
@@ -147,9 +159,21 @@ def load_data(params):
     print(f"Loading data from {file_path}...")
     raw_data = torch.load(file_path)
 
-    # Extract the X tensor (supports 2 or 3 columns)
-    X = raw_data  # Shape: [N, 2] or [N, 3]
-    print(f"Loaded data shape: {X.shape}")
+    # Detect data format
+    use_solver_data = getattr(params, 'use_solver_data', False)
+    
+    if use_solver_data or (isinstance(raw_data, dict) and 'inputs' in raw_data and 'targets' in raw_data):
+        # Solver format: {'inputs': [N, 3], 'targets': [N, 1]}
+        X = raw_data['inputs']
+        Y = raw_data['targets']
+        print(f"Loaded solver data: inputs shape {X.shape}, targets shape {Y.shape}")
+        has_targets = True
+    else:
+        # Legacy format: raw tensor
+        X = raw_data  # Shape: [N, 2] or [N, 3]
+        Y = None
+        print(f"Loaded legacy data shape: {X.shape}")
+        has_targets = False
 
     # Set random seed for reproducible splits
     torch.manual_seed(params.random_seed)
@@ -161,13 +185,13 @@ def load_data(params):
         n_val = 6400
         n_test = 6400
     else:
-        # Legacy 3-column dataset: [x, r0, Z]
+        # 3-column dataset: [x, alpha, T] or [x, r0, Z]
         n_train = 25600  # 100 batches of 256
         n_val = 3328     # 13 batches of 256
         n_test = 3328    # 13 batches of 256
     n_total = n_train + n_val + n_test
 
-    # Randomly sample from the 40k available points
+    # Randomly sample from the available points
     all_indices = torch.randperm(X.shape[0])
     selected_indices = all_indices[:n_total]
 
@@ -184,7 +208,51 @@ def load_data(params):
     print(
         f"Data split: Train={X_train.shape[0]}, Val={X_val.shape[0]}, Test={X_test.shape[0]}")
 
-    return {"train": X_train, "val": X_val, "test": X_test}
+    # Solver data completeness check (for phase 4)
+    if use_solver_data:
+        expected_total = 256_000
+        min_required = int(0.9 * expected_total)
+        n_points = X.shape[0]
+        if n_points < min_required:
+            raise ValueError(f"Solver data has only {n_points} points (<90% of {expected_total}). Aborting.")
+        else:
+            print(f"Solver data has {n_points} points (>=90% of {expected_total}), proceeding with fixed splits.")
+        # Use fixed splits as if we had 256k
+        n_train = 204_800  # 80% of 256k
+        n_val = 25_600     # 10% of 256k
+        n_test = n_points - n_train - n_val
+        n_total = n_train + n_val + n_test
+        all_indices = torch.randperm(n_points)
+        selected_indices = all_indices[:n_total]
+        train_indices = selected_indices[:n_train]
+        val_indices = selected_indices[n_train:n_train + n_val]
+        test_indices = selected_indices[n_train + n_val:]
+        X_train = X[train_indices]
+        X_val = X[val_indices]
+        X_test = X[test_indices]
+        result = {"train": X_train, "val": X_val, "test": X_test}
+        Y_train = Y[train_indices]
+        Y_val = Y[val_indices]
+        Y_test = Y[test_indices]
+        result['train_targets'] = Y_train
+        result['val_targets'] = Y_val
+        result['test_targets'] = Y_test
+        print(f"  Targets included: train={Y_train.shape}, val={Y_val.shape}, test={Y_test.shape}")
+        return result
+    else:
+        result = {"train": X_train, "val": X_val, "test": X_test}
+        
+        # Add targets if available
+        if has_targets:
+            Y_train = Y[train_indices]
+            Y_val = Y[val_indices]
+            Y_test = Y[test_indices]
+            result['train_targets'] = Y_train
+            result['val_targets'] = Y_val
+            result['test_targets'] = Y_test
+            print(f"  Targets included: train={Y_train.shape}, val={Y_val.shape}, test={Y_test.shape}")
+
+        return result
 
 
 def get_data_loaders(data_dict, batch_size, shuffle_train):
@@ -193,18 +261,32 @@ def get_data_loaders(data_dict, batch_size, shuffle_train):
 
     Args:
         data_dict (dict): Dictionary returned by load_data()
+            - Must contain 'train', 'val', 'test' (inputs)
+            - May contain 'train_targets', 'val_targets', 'test_targets'
         batch_size (int): Batch size for the DataLoaders
         shuffle_train (bool): Whether to shuffle training data
 
     Returns:
         dict: Dictionary containing train, val, test DataLoaders
+              Each batch is (inputs,) or (inputs, targets) depending on data
     """
     from torch.utils.data import DataLoader, TensorDataset
 
-    # Create datasets
-    train_dataset = TensorDataset(data_dict['train'])
-    val_dataset = TensorDataset(data_dict['val'])
-    test_dataset = TensorDataset(data_dict['test'])
+    # Check if we have targets
+    has_targets = 'train_targets' in data_dict
+
+    if has_targets:
+        # Create datasets with (inputs, targets) pairs
+        train_dataset = TensorDataset(data_dict['train'], data_dict['train_targets'])
+        val_dataset = TensorDataset(data_dict['val'], data_dict['val_targets'])
+        test_dataset = TensorDataset(data_dict['test'], data_dict['test_targets'])
+        print("DataLoaders created with (inputs, targets) pairs")
+    else:
+        # Create datasets with inputs only
+        train_dataset = TensorDataset(data_dict['train'])
+        val_dataset = TensorDataset(data_dict['val'])
+        test_dataset = TensorDataset(data_dict['test'])
+        print("DataLoaders created with inputs only")
 
     # Create data loaders
     train_loader = DataLoader(
@@ -216,5 +298,6 @@ def get_data_loaders(data_dict, batch_size, shuffle_train):
     return {
         'train': train_loader,
         'val': val_loader,
-        'test': test_loader
+        'test': test_loader,
+        'has_targets': has_targets
     }

@@ -223,11 +223,10 @@ def run_training(params):
             test_state_dict = None
 
     # Create data loaders.
-    # Note: at this point X_train/X_val/X_test are the exact split tensors we want to feed.
-    # Using them explicitly avoids confusion (and makes it easy to insert preprocessing later).
-    data_splits = {"train": X_train, "val": X_val, "test": X_test}
+    # Note: at this point data dict contains train/val/test (and optionally targets)
+    # get_data_loaders handles both cases (with and without targets)
     data_loaders = get_data_loaders(
-        data_splits, batch_size=params.batch_size, shuffle_train=params.shuffle_train
+        data, batch_size=params.batch_size, shuffle_train=params.shuffle_train
     )
 
     train_loader = data_loaders["train"]
@@ -256,7 +255,7 @@ def run_training(params):
         trainer(model, train_loader, val_loader, params)
         
         # Plotting (only if plot_auto is True)
-        if params.plot_auto:
+        if params.plot_auto and params.save_preds:
             # Unified output directory for all diagnostic plots
             output_dir = f"{params.plot_dir}/phase{params.phase}/{params.run_name}"
 
@@ -370,11 +369,17 @@ def main():
             
             # Initialize wandb run (this will get hyperparameters from sweep)
             # Use wandb settings from base config
+            tags = getattr(params, "wandb_tags", None)
+            if tags is not None and isinstance(tags, list):
+                wandb_tags = tags
+            else:
+                wandb_tags = None
             run = wandb.init(
                 name=params.run_name,  # Will be overridden below, but needed for init
                 group=params.wandb_group,
                 project=params.wandb_project,
                 entity=params.wandb_entity,
+                tags=wandb_tags,
             )
             
             # Override params with sweep hyperparameters
@@ -405,12 +410,18 @@ def main():
             print_params=True,
         )
 
+        tags = getattr(params, "wandb_tags", None)
+        if tags is not None and isinstance(tags, list):
+            wandb_tags = tags
+        else:
+            wandb_tags = None
         wandb.login()
         wandb.init(
             name=params.run_name,
             group=params.wandb_group,
             project=params.wandb_project,
             entity=params.wandb_entity,
+            tags=wandb_tags,
         )
         
         # Continue with training

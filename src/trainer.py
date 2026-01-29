@@ -120,7 +120,7 @@ def trainer(
     # Learning rate parameters
     # Default to cosine if not specified
     lr_type = params.get('lr_type', 'cos')
-    warmup_epochs = epochs // 5
+    warmup_epochs = params.lr_warmup_epochs
     start_lr = params.start_lr
     end_lr = params.end_lr
     min_lr = params.min_lr
@@ -201,11 +201,16 @@ def trainer(
         epoch_losses = {'residual': [], 'bc_1': [], 'bc_2': [], 'total': []}
         if getattr(params, "fmt_help", False):
             epoch_losses['fmt'] = []
+        if getattr(params, 'hybrid_training', False):
+            epoch_losses['data'] = []
+            epoch_losses['physics'] = []
 
         # Collect raw losses for adaptive weighting (update once per epoch)
         raw_losses_for_weighting = {'residual': [], 'bc_1': [], 'bc_2': []}
         if getattr(params, "fmt_help", False):
             raw_losses_for_weighting['fmt'] = []
+        if getattr(params, 'hybrid_training', False):
+            raw_losses_for_weighting['data'] = []
         # Collect gradient norms per batch for diagnostics
         epoch_grad_norms = []
         clipped_grad_norms = []
@@ -213,10 +218,19 @@ def trainer(
         train_loader_iter = tqdm(
             train, desc=f"Epoch {ep}/{epochs}", leave=True, ncols=100)
 
+        # Check if hybrid training is enabled
+        hybrid_training = getattr(params, 'hybrid_training', False)
+
         for batch in train_loader_iter:
-            # Extract x coordinates (first column), r0 from batch
-            # Data shape: [batch_size, 2] where columns are [x, r0]
+            # Extract inputs (and targets if hybrid training)
+            # Data shape: [batch_size, 2] or [batch_size, 3] where columns are [x, alpha] or [x, alpha, T]
             inputs = batch[0]  # Unpack tuple from DataLoader
+            
+            # Check if we have targets (hybrid training)
+            if len(batch) > 1 and hybrid_training:
+                targets = batch[1]
+            else:
+                targets = None
             
             # Clamp x to avoid singularity at x=0 and ensure x <= 1 for phi_0_transform
             inputs[:, 0].clamp_(min=1e-6, max=1.0)
@@ -285,6 +299,13 @@ def trainer(
             if getattr(params, "fmt_help", False):
                 loss_dict['fmt'] = fmt_loss
 
+            # Compute data loss for hybrid training
+            if hybrid_training and targets is not None:
+                data_loss = losses.compute_data_loss_phase4(outputs, targets, params)
+                loss_dict['data'] = data_loss
+            else:
+                data_loss = torch.tensor(0.0, device=outputs.device)
+
             # For adaptive weighting: collect raw losses, don't update weights yet
             if weighter.strategy == 'adaptive':
                 raw_losses_for_weighting['residual'].append(
@@ -293,6 +314,8 @@ def trainer(
                 raw_losses_for_weighting['bc_2'].append(bc_2_loss.detach())
                 if getattr(params, "fmt_help", False):
                     raw_losses_for_weighting['fmt'].append(fmt_loss.detach())
+                if hybrid_training and targets is not None:
+                    raw_losses_for_weighting['data'].append(data_loss.detach())
 
             
             if params.phase == 3:
@@ -333,7 +356,7 @@ def trainer(
 
             # Clip gradients to prevent explosion, if activated
             if getattr(params, "grad_clipping", False):
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
 
             optimizer.step()
 
@@ -343,6 +366,11 @@ def trainer(
             epoch_losses['bc_2'].append(bc_2_loss.item())
             if getattr(params, "fmt_help", False):
                 epoch_losses['fmt'].append(fmt_loss.item())
+            if hybrid_training:
+                epoch_losses['data'].append(data_loss.item())
+                # Physics loss is residual + BCs (weighted)
+                physics_loss = weighter.get_physics_loss(loss_dict) if hasattr(weighter, 'get_physics_loss') else residual_loss
+                epoch_losses['physics'].append(physics_loss.item() if torch.is_tensor(physics_loss) else physics_loss)
             epoch_losses['total'].append(total_loss.item())
 
             # Update progress bar
@@ -380,6 +408,8 @@ def trainer(
         avg_bc2 = np.mean(epoch_losses['bc_2'])
         avg_total = np.mean(epoch_losses['total'])
         avg_fmt = np.mean(epoch_losses['fmt']) if 'fmt' in epoch_losses else 0.0
+        avg_data = np.mean(epoch_losses['data']) if 'data' in epoch_losses and len(epoch_losses['data']) > 0 else 0.0
+        avg_physics = np.mean(epoch_losses['physics']) if 'physics' in epoch_losses and len(epoch_losses['physics']) > 0 else 0.0
 
         # Update weights once per epoch for adaptive strategy
         if weighter.strategy == 'adaptive':
@@ -390,11 +420,16 @@ def trainer(
             }
             if getattr(params, "fmt_help", False) and len(raw_losses_for_weighting['fmt']) > 0:
                 avg_losses_for_weighting['fmt'] = torch.stack(raw_losses_for_weighting['fmt']).mean()
+            if getattr(params, 'hybrid_training', False) and len(raw_losses_for_weighting.get('data', [])) > 0:
+                avg_losses_for_weighting['data'] = torch.stack(raw_losses_for_weighting['data']).mean()
+                avg_losses_for_weighting['physics_total'] = avg_losses_for_weighting['residual']  # Simplified
             weighter.update_weights(avg_losses_for_weighting)
             # Reset collection for next epoch
             raw_losses_for_weighting = {'residual': [], 'bc_1': [], 'bc_2': []}
             if getattr(params, "fmt_help", False):
                 raw_losses_for_weighting['fmt'] = []
+            if getattr(params, 'hybrid_training', False):
+                raw_losses_for_weighting['data'] = []
 
         # Update scheduler AFTER all batches (PyTorch best practice)
         scheduler.step()
@@ -444,19 +479,19 @@ def trainer(
             }
 
         # Log to wandb
+        is_soft_mode = params.mode == "soft"
         log_dict = {
             "info/learning_rate": current_lr,
             "info/epoch": ep,
             "info/epoch_training_time": time_taken,
-            "train/residual_loss": avg_residual,
-            "train/bc_1_loss": avg_bc1,
-            "train/bc_2_loss": avg_bc2,
+            "train/pde_loss": avg_residual,
+            **({"train/bc_1_loss": avg_bc1, "train/bc_2_loss": avg_bc2} if is_soft_mode else {}),
             **({"train/fmt_loss": avg_fmt} if 'fmt' in epoch_losses else {}),
+            **({"train/data_loss": avg_data, "train/physics_loss": avg_physics} if getattr(params, 'hybrid_training', False) else {}),
             "train/total_loss": avg_total,
-            "weights/residual_weight": weighter.residual_weight,
-            "weights/bc_1_weight": weighter.bc_1_weight,
-            "weights/bc_2_weight": weighter.bc_2_weight,
+            **({"weights/residual_weight": weighter.residual_weight, "weights/bc_1_weight": weighter.bc_1_weight, "weights/bc_2_weight": weighter.bc_2_weight} if is_soft_mode else {}),
             **({"weights/fmt_weight": weighter.fmt_weight} if getattr(params, "fmt_help", False) else {}),
+            **({"weights/physics_weight": weighter.physics_weight, "weights/data_weight": weighter.data_weight} if getattr(params, 'hybrid_training', False) else {}),
             **checks,
             **grad_stats,
         }
@@ -472,9 +507,18 @@ def trainer(
             val_losses = {'residual': [], 'bc_1': [], 'bc_2': [], 'total': []}
             if getattr(params, "fmt_help", False):
                 val_losses['fmt'] = []
+            if getattr(params, 'hybrid_training', False):
+                val_losses['data'] = []
+                val_losses['physics'] = []
 
             for batch in val:
                 inputs = batch[0]  # Unpack tuple from DataLoader
+                
+                # Check if we have targets (hybrid training)
+                if len(batch) > 1 and hybrid_training:
+                    targets = batch[1]
+                else:
+                    targets = None
                 
                 # Clamp x to avoid singularity at x=0 and ensure x <= 1 for phi_0_transform (same as training)
                 inputs[:, 0].clamp_(min=1e-6, max=1.0)
@@ -522,6 +566,13 @@ def trainer(
                 if getattr(params, "fmt_help", False):
                     val_losses['fmt'].append(fmt_loss.item())
 
+                # Compute data loss for hybrid validation
+                if hybrid_training and targets is not None:
+                    val_data_loss = losses.compute_data_loss_phase4(outputs, targets, params)
+                    val_losses['data'].append(val_data_loss.item())
+                else:
+                    val_data_loss = torch.tensor(0.0, device=outputs.device)
+
                 # Use weighter for consistent total loss (but don't update weights)
                 val_loss_dict = {
                     'residual': residual_loss,
@@ -530,6 +581,10 @@ def trainer(
                 }
                 if getattr(params, "fmt_help", False):
                     val_loss_dict['fmt'] = fmt_loss
+                if hybrid_training and targets is not None:
+                    val_loss_dict['data'] = val_data_loss
+                    val_physics_loss = weighter.get_physics_loss(val_loss_dict) if hasattr(weighter, 'get_physics_loss') else residual_loss
+                    val_losses['physics'].append(val_physics_loss.item() if torch.is_tensor(val_physics_loss) else val_physics_loss)
                 val_total_loss = weighter.get_weighted_loss(val_loss_dict)
                 val_losses['total'].append(val_total_loss.item())
 
@@ -538,6 +593,8 @@ def trainer(
             avg_val_bc2 = np.mean(val_losses['bc_2'])
             avg_val_total = np.mean(val_losses['total'])
             avg_val_fmt = np.mean(val_losses['fmt']) if 'fmt' in val_losses else 0.0
+            avg_val_data = np.mean(val_losses['data']) if 'data' in val_losses and len(val_losses['data']) > 0 else 0.0
+            avg_val_physics = np.mean(val_losses['physics']) if 'physics' in val_losses and len(val_losses['physics']) > 0 else 0.0
             time_end_val = time.time()
             time_taken_val = time_end_val - time_start_val
 
@@ -545,10 +602,10 @@ def trainer(
             print(f"  val loss = {avg_val_total:.6e}")
 
             wandb.log({
-                "val/residual_loss": avg_val_residual,
-                "val/bc_1_loss": avg_val_bc1,
-                "val/bc_2_loss": avg_val_bc2,
+                "val/pde_loss": avg_val_residual,
+                **({"val/bc_1_loss": avg_val_bc1, "val/bc_2_loss": avg_val_bc2} if is_soft_mode else {}),
                 **({"val/fmt_loss": avg_val_fmt} if 'fmt' in val_losses else {}),
+                **({"val/data_loss": avg_val_data, "val/physics_loss": avg_val_physics} if getattr(params, 'hybrid_training', False) else {}),
                 "val/total_loss": avg_val_total,
                 "info/epoch_validation_time": time_taken_val
             })
@@ -563,7 +620,7 @@ def trainer(
             torch.save(model.state_dict(), ckpt_path)
             print(f"Saved weights checkpoint to {ckpt_path}")
 
-    if len(predictions) != 0:
+    if len(predictions) != 0 and getattr(params, "save_preds", False):
         save_path = PROJECT_ROOT / params.pred_dir / f"phase{params.phase}" / f"{params.run_name}.pkl"
     
         # Ensure directory exists

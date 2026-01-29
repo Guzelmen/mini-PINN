@@ -560,14 +560,20 @@ def compute_residual_loss_phase4(outputs, inputs, params, val_stage: bool = Fals
         γ = 0.0899 · Z / T_kV^(3/4)  (Z=1 for hydrogen)
         I_{1/2} is the Fermi-Dirac integral of order 1/2 (unnormalized)
 
-    At T→0, this reduces to the standard T=0 Thomas-Fermi equation:
-        d²ψ/dx² = α^(3/2) · ψ^(3/2) / x^(1/2)
+    Training mode supports:
+        - m-weighted residual: LHS = d²ψ/dx² · x^(0.5+m), RHS = (λ³/γ) · x^(1.5+m) · I_{1/2}(η)
+        - residual_norm_strategy: "coeff", "relative", or "rhs_only"
+    
+    Validation mode always uses:
+        - Raw residual (no m-weighting): d²ψ/dx² - (λ³/γ) · x · I_{1/2}(η)
+        - Fixed "coeff" normalization: divide by λ³/γ
 
     Args:
         outputs: ψ(x) predictions, shape [batch, 1]
         inputs: [batch, 3] with columns [x, alpha, T_kV]
-        params: config with debug_mode, loss_type, etc.
-        val_stage: if True, skip m-weighted loss variant
+        params: config with debug_mode, loss_type, use_m_loss, m_loss_m_value, 
+                residual_norm_strategy, etc.
+        val_stage: if True, use fixed coeff normalization without m-weighting
 
     Returns:
         residual loss: mean squared residual over the batch
@@ -578,15 +584,15 @@ def compute_residual_loss_phase4(outputs, inputs, params, val_stage: bool = Fals
     T_kV = inputs[:, 2:3]
 
     # Compute second derivative d²ψ/dx²
-    d2psi_dx2 = sec_deriv_auto(outputs, inputs, var1=0, var2=0)
+    d2phi_dx2 = sec_deriv_auto(outputs, inputs, var1=0, var2=0)
 
     # Model output is ψ(x)
     if len(outputs.shape) == 2 and outputs.shape[1] == 1:
-        psi = outputs
+        phi = outputs
     elif len(outputs.shape) == 1:
-        psi = outputs.unsqueeze(1)
+        phi = outputs.unsqueeze(1)
     else:
-        psi = outputs
+        phi = outputs
 
     # Compute λ and γ
     lam = compute_lambda(alpha, T_kV)  # λ = α * b * T^(1/4) / c0
@@ -599,12 +605,12 @@ def compute_residual_loss_phase4(outputs, inputs, params, val_stage: bool = Fals
         print(f"[Phase4 loss] T_kV: min={T_kV.min().item():.6g}, max={T_kV.max().item():.6g}")
         print(f"[Phase4 loss] λ: min={lam.min().item():.6g}, max={lam.max().item():.6g}")
         print(f"[Phase4 loss] γ: min={gamma.min().item():.6g}, max={gamma.max().item():.6g}")
-        print(f"[Phase4 loss] ψ: min={psi.min().item():.6g}, max={psi.max().item():.6g}")
-        print(f"[Phase4 loss] d²ψ/dx²: min={d2psi_dx2.min().item():.6g}, max={d2psi_dx2.max().item():.6g}")
+        print(f"[Phase4 loss] ψ: min={phi.min().item():.6g}, max={phi.max().item():.6g}")
+        print(f"[Phase4 loss] d²ψ/dx²: min={d2phi_dx2.min().item():.6g}, max={d2phi_dx2.max().item():.6g}")
 
     # Compute argument to FD integral: η = γψ/(λx)
     # Add small epsilon to avoid division by zero near x=0
-    eta = gamma * psi / (lam * x + 1e-12)
+    eta = gamma * phi / (lam * x + 1e-12)
 
     if getattr(params, "debug_mode", False):
         print(f"[Phase4 loss] η (FD arg): min={eta.min().item():.6g}, max={eta.max().item():.6g}")
@@ -615,23 +621,64 @@ def compute_residual_loss_phase4(outputs, inputs, params, val_stage: bool = Fals
     if getattr(params, "debug_mode", False):
         print(f"[Phase4 loss] I_{{1/2}}(η): min={fd_half.min().item():.6g}, max={fd_half.max().item():.6g}")
 
-    # PDE residual: d²ψ/dx² - (λ³/γ) · x · I_{1/2}(η) = 0
+    # Coefficient λ³/γ
     coeff = (lam ** 3) / gamma
-    rhs = coeff * x * fd_half
-    residual = d2psi_dx2 - rhs
 
-    if getattr(params, "debug_mode", False):
-        print(f"[Phase4 loss] coeff (λ³/γ): min={coeff.min().item():.6g}, max={coeff.max().item():.6g}")
-        print(f"[Phase4 loss] RHS: min={rhs.min().item():.6g}, max={rhs.max().item():.6g}")
-        print(f"[Phase4 loss] residual: min={residual.min().item():.6g}, max={residual.max().item():.6g}")
+    if val_stage:
+        # VALIDATION: Fixed coeff normalization, no m-weighting
+        # Raw residual: d²ψ/dx² - (λ³/γ) · x · I_{1/2}(η)
+        rhs = coeff * x * fd_half
+        residual = d2phi_dx2 - rhs
+        norm_residual = residual / coeff
+        
+        if getattr(params, "debug_mode", False):
+            print(f"[Phase4 loss VAL] coeff (λ³/γ): min={coeff.min().item():.6g}, max={coeff.max().item():.6g}")
+            print(f"[Phase4 loss VAL] norm_residual: min={norm_residual.min().item():.6g}, max={norm_residual.max().item():.6g}")
+    else:
+        # TRAINING: Apply m-weighting and chosen normalization strategy
+        use_m_loss = getattr(params, "use_m_loss", False)
+        m = getattr(params, "m_loss_m_value", -0.5) if use_m_loss else -0.5
+        norm_strategy = getattr(params, "residual_norm_strategy", "coeff")
+        
+        # m-weighted residual:
+        # LHS = d²ψ/dx² · x^(0.5+m)
+        # RHS = (λ³/γ) · x^(1.5+m) · I_{1/2}(η)
+        # Note: m=-0.5 gives original residual (x^0 and x^1 terms)
+        LHS = d2phi_dx2 * (x ** (0.5 + m))
+        RHS = coeff * (x ** (1.5 + m)) * fd_half
+        raw_residual = LHS - RHS
+        
+        if getattr(params, "debug_mode", False):
+            print(f"[Phase4 loss TRAIN] m={m}, norm_strategy={norm_strategy}")
+            print(f"[Phase4 loss TRAIN] LHS: min={LHS.min().item():.6g}, max={LHS.max().item():.6g}")
+            print(f"[Phase4 loss TRAIN] RHS: min={RHS.min().item():.6g}, max={RHS.max().item():.6g}")
+            print(f"[Phase4 loss TRAIN] raw_residual: min={raw_residual.min().item():.6g}, max={raw_residual.max().item():.6g}")
+        
+        # Apply normalization strategy
+        if norm_strategy == "coeff":
+            # Divide by λ³/γ
+            norm_residual = raw_residual / coeff
+        elif norm_strategy == "relative":
+            # Divide by max(|LHS|, |RHS|) - per-sample relative error
+            scale = torch.maximum(torch.abs(LHS), torch.abs(RHS)) + 1e-8
+            norm_residual = raw_residual / scale
+        elif norm_strategy == "rhs_only":
+            # Divide by |RHS| - RHS is always positive
+            scale = torch.abs(RHS) + 1e-8
+            norm_residual = raw_residual / scale
+        else:
+            raise ValueError(f"Unknown residual_norm_strategy: {norm_strategy}")
+        
+        if getattr(params, "debug_mode", False):
+            print(f"[Phase4 loss TRAIN] norm_residual: min={norm_residual.min().item():.6g}, max={norm_residual.max().item():.6g}")
 
     # Check for negative psi (should not happen with exp transform)
-    if (psi < 0).any() and getattr(params, "debug_mode", False):
+    if (phi < 0).any() and getattr(params, "debug_mode", False):
         print("[Phase4 loss] Warning: ψ is negative in some samples")
 
     # Compute loss
     if params.loss_type == "mse":
-        loss = torch.mean(residual ** 2)
+        loss = torch.mean(norm_residual ** 2)
     else:
         raise ValueError(f"Unknown loss_type: {params.loss_type}")
 
@@ -654,15 +701,60 @@ def compute_bc_loss_2_phase4(outputs, inputs):
     return compute_bc_loss_2_phase1(outputs, inputs)
 
 
+def compute_data_loss_phase4(outputs, targets, params):
+    """
+    Compute data loss: MSE between network predictions and ground truth.
+    
+    Args:
+        outputs: ψ(x) predictions from network, shape [batch, 1]
+        targets: ψ_true(x) from numerical solver, shape [batch, 1]
+        params: config with loss_type, debug_mode, etc.
+        
+    Returns:
+        data_loss: MSE between outputs and targets
+    """
+    # Ensure shapes match
+    if len(outputs.shape) == 2 and outputs.shape[1] == 1:
+        psi_pred = outputs
+    elif len(outputs.shape) == 1:
+        psi_pred = outputs.unsqueeze(1)
+    else:
+        psi_pred = outputs
+        
+    if len(targets.shape) == 1:
+        psi_true = targets.unsqueeze(1)
+    else:
+        psi_true = targets
+    
+    # Compute MSE
+    if params.loss_type == "mse":
+        loss = torch.mean((psi_pred - psi_true) ** 2)
+    else:
+        raise ValueError(f"Unknown loss_type: {params.loss_type}")
+    
+    if getattr(params, "debug_mode", False):
+        print(f"[Phase4 data loss] ψ_pred: min={psi_pred.min().item():.6g}, max={psi_pred.max().item():.6g}")
+        print(f"[Phase4 data loss] ψ_true: min={psi_true.min().item():.6g}, max={psi_true.max().item():.6g}")
+        print(f"[Phase4 data loss] MSE: {loss.item():.6g}")
+    
+    return loss
+
+
 class LossWeighter_phase4:
     """
     Handles loss weighting for Phase 4 (temperature-dependent TF).
-    Mirrors Phase 2 behavior.
+    Supports hybrid training with physics + data losses.
     """
 
     def __init__(self, params):
         self.mode = params.mode  # "soft" or "hard"
         self.strategy = params.loss_strategy  # "fixed" or "adaptive"
+        
+        # Hybrid training support
+        self.hybrid_training = getattr(params, 'hybrid_training', False)
+        self.hybrid_strategy = getattr(params, 'hybrid_weight_strategy', 'fixed')
+        self.physics_weight = getattr(params, 'physics_loss_weight', 1.0)
+        self.data_weight = getattr(params, 'data_loss_weight', 1.0)
 
         if self.mode == "hard":
             self.residual_weight = 1.0
@@ -674,6 +766,8 @@ class LossWeighter_phase4:
             self.bc_2_weight = params.relative_weights["bc_2"]
 
     def update_weights(self, loss_dict):
+        """Update weights for adaptive strategies."""
+        # Adaptive weighting for physics losses (soft mode)
         if self.strategy == 'adaptive' and self.mode == 'soft':
             loss_mags = {}
             for key in ["residual", "bc_1", "bc_2"]:
@@ -681,19 +775,27 @@ class LossWeighter_phase4:
                     loss_mag = loss_dict[key].detach().item()
                     loss_mags[key] = max(loss_mag, 1e-8)
 
-            if not loss_mags:
-                return
+            if loss_mags:
+                avg_mag = sum(loss_mags.values()) / len(loss_mags)
 
-            avg_mag = sum(loss_mags.values()) / len(loss_mags)
+                if "residual" in loss_mags:
+                    self.residual_weight = avg_mag / loss_mags["residual"]
+                if "bc_1" in loss_mags:
+                    self.bc_1_weight = avg_mag / loss_mags["bc_1"]
+                if "bc_2" in loss_mags:
+                    self.bc_2_weight = avg_mag / loss_mags["bc_2"]
+        
+        # Adaptive weighting for hybrid (physics vs data)
+        if self.hybrid_training and self.hybrid_strategy == 'adaptive':
+            if 'data' in loss_dict and 'physics_total' in loss_dict:
+                data_mag = max(loss_dict['data'].detach().item(), 1e-8)
+                physics_mag = max(loss_dict['physics_total'].detach().item(), 1e-8)
+                avg_mag = (data_mag + physics_mag) / 2.0
+                self.physics_weight = avg_mag / physics_mag
+                self.data_weight = avg_mag / data_mag
 
-            if "residual" in loss_mags:
-                self.residual_weight = avg_mag / loss_mags["residual"]
-            if "bc_1" in loss_mags:
-                self.bc_1_weight = avg_mag / loss_mags["bc_1"]
-            if "bc_2" in loss_mags:
-                self.bc_2_weight = avg_mag / loss_mags["bc_2"]
-
-    def get_weighted_loss(self, loss_dict):
+    def get_physics_loss(self, loss_dict):
+        """Compute weighted sum of physics losses (residual + BCs)."""
         total = 0.0
         if "residual" in loss_dict:
             total += self.residual_weight * loss_dict["residual"]
@@ -702,6 +804,17 @@ class LossWeighter_phase4:
                 total += self.bc_1_weight * loss_dict["bc_1"]
             if "bc_2" in loss_dict:
                 total += self.bc_2_weight * loss_dict["bc_2"]
+        return total
+
+    def get_weighted_loss(self, loss_dict):
+        """Compute total weighted loss (physics + data if hybrid)."""
+        physics_total = self.get_physics_loss(loss_dict)
+        
+        if self.hybrid_training and "data" in loss_dict:
+            total = self.physics_weight * physics_total + self.data_weight * loss_dict["data"]
+        else:
+            total = physics_total
+        
         return total
 
 

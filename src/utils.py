@@ -143,7 +143,15 @@ def fmt_series(x: torch.Tensor, a2: torch.Tensor, alpha: torch.Tensor = None, **
     psi_fmt = 1.0 + term1 + term2 + term4 + term5 + term6 + term7 + term8 + term9 + term10
     return psi_fmt
 
-
+def phi_bc_transform_phase4(x: torch.Tensor, N: torch.Tensor, N_prime: torch.Tensor, params) -> torch.Tensor:
+    """
+    Phi(x) = x^2 + 1 + xN(x) + x(1 - x)N'(x)
+    """
+    phi = x**2 + 1 + x * N + x * (1 - x) * N_prime
+    if params.debug_mode is True:
+        print(f"[During fwd] phi -> Min: {phi.min().item()}, Max: {phi.max().item()}")
+    return phi
+    
 def phi_w_transform(x: torch.Tensor, N: torch.Tensor, N_prime: torch.Tensor, params) -> torch.Tensor:
     w = 0.5 * x**2 + x * (2 - x) * N + x * (1 - x) * N_prime
     if params.debug_mode is True:

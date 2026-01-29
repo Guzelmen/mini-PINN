@@ -4,7 +4,7 @@ This file contains the model architecture for the small PINN.
 import torch
 import torch.nn as nn
 import math
-from .utils import first_deriv_auto, sec_deriv_auto, phi_w_transform, phi_0_transform
+from .utils import first_deriv_auto, sec_deriv_auto, phi_w_transform, phi_0_transform, phi_bc_transform_phase4
 from .fd_integrals import B_M, C0_M  # Physical constants for phase 4
 
 
@@ -453,13 +453,12 @@ class Model_hard_phase4(nn.Module):
     """
     Phase 4: Temperature-dependent Thomas-Fermi model.
 
-    Inputs: x in [0,1], alpha (~1 to 100), T_kV (0.1 to 100 keV). Output: Psi(x).
+    Inputs: x in [0,1], alpha (~1 to 100), T_kV (0.1 to 100 keV). Output: Phi(x).
 
     Hard constraint: transform to ensure 2 constraints:
-     - Psi(0) = 1
-     - Psi(1) = Psi'(1)
-    Transform: w(x) = 0.5*x^2 + x*(2-x)*N + x*(1-x)*N'
-               Psi(x) = exp(w(x)), enforces positivity
+     - Phi(0) = 1
+     - Phi(1) = Phi'(1)
+    Transform: Phi(x) = x^2 + 1 + xN(x) + x(1 - x)N'(x)
 
     Network receives (controlled by params.inp_dim):
      - inp_dim=3: [x, norm_alpha, norm_T]
@@ -616,15 +615,10 @@ class Model_hard_phase4(nn.Module):
             print(f"[Phase4 fwd] N: min={N.min().item():.6g}, max={N.max().item():.6g}")
             print(f"[Phase4 fwd] N_prime: min={N_prime.min().item():.6g}, max={N_prime.max().item():.6g}")
 
-        # Apply w-transform: w = 0.5*x^2 + x*(2-x)*N + x*(1-x)*N'
-        # Then Psi = exp(w) to ensure positivity
-        Phi = phi_w_transform(x=x, N=N, N_prime=N_prime, params=self.params)
+        Phi = phi_bc_transform_phase4(x=x, N=N, N_prime=N_prime, params=self.params)
 
         if self.debug_mode:
-            print(f"[Phase4 fwd] Phi (exp(w)): min={Phi.min().item():.6g}, max={Phi.max().item():.6g}")
-
-        if (Phi < 0).any() and self.debug_mode:
-            print("[Phase4 fwd] Warning: Phi is negative (should not happen with exp transform)")
+            print(f"[Phase4 fwd] Phi: min={Phi.min().item():.6g}, max={Phi.max().item():.6g}")
 
         # Optional phi_0 term (physics-informed initialization)
         if self.add_phi0:

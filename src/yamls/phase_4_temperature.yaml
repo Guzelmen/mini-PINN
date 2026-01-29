@@ -9,22 +9,30 @@ base_config: &BASE_CONFIG
   random_seed: 42
 
   phase: 4 # temperature-dependent TF
-  run_name: "phase4_small_range_debug"
+  run_name: "phase4_HYBRID_test_best_sweep_config"
   n_vars: 3  # network inputs
-  debug_mode: True
+  debug_mode: False
 
   ## model parameters
   mode: "hard" # "soft" or "hard"
   inp_dim: 3  
   nlayers: 6
-  hidden: 64  # larger network for 3D input
-  activation: "Tanh" # SiLU, Tanh, ReLU, Identity, SIREN, GELU, Mish
+  hidden: 128  # larger network for 3D input
+  activation: "SiLU" # SiLU, Tanh, ReLU, Identity, SIREN, GELU, Mish
   w0: 30
   add_phi0: False
   k_val: 10
-  use_m_loss: False
-  update_m: False
-  m_loss_m_value: 0.5
+  
+  # m-weighted loss: multiplies residual by x^(0.5+m) on LHS, x^(1.5+m) on RHS
+  # m=-0.5 is equivalent to no m-weighting (baseline)
+  use_m_loss: True
+  m_loss_m_value: -0.5  # sweep values: -0.5, 0, 0.5, 1.0
+  
+  # Residual normalization strategy for training
+  # "coeff": divide by λ³/γ (current default)
+  # "relative": divide by max(|LHS|, |RHS|) - per-sample relative error  
+  # "rhs_only": divide by |RHS|
+  residual_norm_strategy: "coeff"
 
   ## normalisation (alpha)
   norm_mode: "standardize"   # minmax or standardize
@@ -38,9 +46,10 @@ base_config: &BASE_CONFIG
   T_std: 1.0
 
   ## wandb parameters
-  wandb_group: "week19jan"
+  wandb_group: "week26jan"
   wandb_project: "mini_pinn"
   wandb_entity: "guzelmen_msci_project"
+  wandb_tags: ["hybrid", "smallrange", "fixed_weights"]
 
   ## optimizer parameters
   lr_type: "cosine" # constant, linear, linear with cosine decay...
@@ -49,7 +58,7 @@ base_config: &BASE_CONFIG
   end_lr: 5e-4
   lr_warmup_epochs: 100
   min_lr: 1e-5  # Minimum LR for cosine decay
-  grad_clipping: False
+  grad_clipping: True  # Clips to max_norm=10.0
 
   ## loss parameters
   loss_type: "mse"
@@ -57,6 +66,13 @@ base_config: &BASE_CONFIG
   loss_strategy: "fixed" # "fixed" or "adaptive"
   fmt_weights: {"residual": 1.0, "fmt": 1.0}
   cancel_c: False
+
+  ## hybrid training (data + physics loss)
+  hybrid_training: True  # If True, combine PDE loss with data loss
+  use_solver_data: True  # If True, load data in {inputs, targets} format
+  physics_loss_weight: 1.0  # Weight for PDE residual loss
+  data_loss_weight: 1.0     # Weight for data MSE loss
+  hybrid_weight_strategy: "fixed"  # "fixed" or "adaptive"
 
   ## data parameters
   # Phase 4 SMALL range: [x, alpha, T_kV] with 160x20x20 = 64k points
@@ -66,11 +82,12 @@ base_config: &BASE_CONFIG
 
   ## training parameters
   stage: "train"
-  epochs: 10
+  epochs: 5
+  save_preds: False
   save_every: 100
 
   # saving
-  plot_auto: False  # Phase 4 plotting TBD
+  plot_auto: False
   save_weights: False
   save_weights_every: 100
   pred_dir: "predictions"
