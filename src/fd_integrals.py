@@ -43,10 +43,15 @@ from FDint_PyTorch import (
 )
 
 # Re-export with simpler names for use in this project
-# These include the standard Gamma function normalization
-fermi_dirac_minus_half = fermi_dirac_integral_minus_half
-fermi_dirac_half = fermi_dirac_integral_half
-fermi_dirac_three_half = fermi_dirac_integral_three_half
+# Need to ignore gamma normalization in the end
+def fermi_dirac_minus_half(x):
+    return fermi_dirac_integral_minus_half(x) * (math.sqrt(math.pi))
+
+def fermi_dirac_half(x):
+    return fermi_dirac_integral_half(x) * (0.5 * math.sqrt(math.pi))
+
+def fermi_dirac_three_half(x):
+    return fermi_dirac_integral_three_half(x) * (0.75 * math.sqrt(math.pi))
 
 
 def compute_lambda(alpha, T_kV):

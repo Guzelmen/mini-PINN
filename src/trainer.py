@@ -222,17 +222,25 @@ def trainer(
         hybrid_training = getattr(params, 'hybrid_training', False)
 
         for batch in train_loader_iter:
-            # Extract inputs (and targets if hybrid training)
-            # Data shape: [batch_size, 2] or [batch_size, 3] where columns are [x, alpha] or [x, alpha, T]
+            # Extract inputs (and targets if present in data)
+            # DataLoader returns a tuple. If TensorDataset has 2 tensors, batch is (inputs, targets)
+            # If TensorDataset has 1 tensor, batch is (inputs,)
             inputs = batch[0]  # Unpack tuple from DataLoader
+            if params.debug_mode:
+                print(f"Batch input shape: {inputs.shape}")
+                print(f"Batch length: {len(batch)}")
             
-            # Check if we have targets (hybrid training)
-            if len(batch) > 1 and hybrid_training:
+            # Check if we have targets in the batch
+            if len(batch) > 1:
                 targets = batch[1]
+                if params.debug_mode:
+                    print(f"Batch targets shape: {targets.shape}")
             else:
                 targets = None
+                if params.debug_mode:
+                    print("No targets in batch")
             
-            # Clamp x to avoid singularity at x=0 and ensure x <= 1 for phi_0_transform
+            # Clamp x to avoid singularity at x=0
             inputs[:, 0].clamp_(min=1e-6, max=1.0)
 
             # Ensure inputs require gradients for autograd wrt x
@@ -379,7 +387,7 @@ def trainer(
                 residual=residual_loss.item(),
                 bc1=bc_1_loss.item(),
                 bc2=bc_2_loss.item(),
-                fmt=fmt_loss.item() if getattr(params, "fmt_help", False) else 0.0
+                data=data_loss.item() if hybrid_training else 0.0
             )
 
         if ep % params.save_every == 0:
@@ -409,6 +417,8 @@ def trainer(
         avg_total = np.mean(epoch_losses['total'])
         avg_fmt = np.mean(epoch_losses['fmt']) if 'fmt' in epoch_losses else 0.0
         avg_data = np.mean(epoch_losses['data']) if 'data' in epoch_losses and len(epoch_losses['data']) > 0 else 0.0
+        print("We have data loss:", 'data' in epoch_losses)
+        print("Min and max data loss:", np.min(epoch_losses['data']) if 'data' in epoch_losses and len(epoch_losses['data']) > 0 else 'N/A', np.max(epoch_losses['data']) if 'data' in epoch_losses and len(epoch_losses['data']) > 0 else 'N/A')
         avg_physics = np.mean(epoch_losses['physics']) if 'physics' in epoch_losses and len(epoch_losses['physics']) > 0 else 0.0
 
         # Update weights once per epoch for adaptive strategy
@@ -512,10 +522,13 @@ def trainer(
                 val_losses['physics'] = []
 
             for batch in val:
+                # Extract inputs (and targets if present in data)
+                # DataLoader returns a tuple. If TensorDataset has 2 tensors, batch is (inputs, targets)
+                # If TensorDataset has 1 tensor, batch is (inputs,)
                 inputs = batch[0]  # Unpack tuple from DataLoader
                 
-                # Check if we have targets (hybrid training)
-                if len(batch) > 1 and hybrid_training:
+                # Check if we have targets in the batch
+                if len(batch) > 1:
                     targets = batch[1]
                 else:
                     targets = None
@@ -568,7 +581,7 @@ def trainer(
 
                 # Compute data loss for hybrid validation
                 if hybrid_training and targets is not None:
-                    val_data_loss = losses.compute_data_loss_phase4(outputs, targets, params)
+                    val_data_loss = losses.compute_data_loss_phase4(outputs, targets, params, val_stage=True)
                     val_losses['data'].append(val_data_loss.item())
                 else:
                     val_data_loss = torch.tensor(0.0, device=outputs.device)

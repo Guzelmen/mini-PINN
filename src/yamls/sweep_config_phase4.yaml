@@ -23,7 +23,7 @@ parameters:
   m_loss_m_value:
     values: [-0.5, 0.0, 0.5, 1.0]
   residual_norm_strategy:
-    values: ["coeff", "relative", "rhs_only"]
+    values: ["coeff", "relative", "rel_l2"]
   hidden:
     values: [64, 128]
   activation:

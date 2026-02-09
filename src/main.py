@@ -49,16 +49,16 @@ def run_training(params):
 
     data = load_data(params)
     
+    # Extract data splits (always, not conditionally)
+    X_train = data["train"]
+    X_val = data["val"]
+    X_test = data["test"]
 
     # Compute normalization stats on log1p(alpha) using TRAIN ONLY (avoid val/test leakage),
     # then log diagnostics for val/test distributions. These stats are stored on `params`
     # for the model to use during forward passes.
     try:
         if int(params.phase) != 1 and str(params.mode).strip() == "hard":
-            # Fit mean/std on train only
-            X_train = data["train"]
-            X_val = data["val"]
-            X_test = data["test"]
 
             train_log_alpha = torch.log1p(X_train[:, 1:2])
             a_mean = float(train_log_alpha.mean().item())
@@ -223,10 +223,19 @@ def run_training(params):
             test_state_dict = None
 
     # Create data loaders.
-    # Note: at this point data dict contains train/val/test (and optionally targets)
-    # get_data_loaders handles both cases (with and without targets)
+    # Note: at this point X_train/X_val/X_test are the exact split tensors we want to feed.
+    # Using them explicitly avoids confusion (and makes it easy to insert preprocessing later).
+    data_splits = {"train": X_train, "val": X_val, "test": X_test}
+    
+    # Include targets if they exist in the data
+    if "train_targets" in data:
+        data_splits["train_targets"] = data["train_targets"]
+        data_splits["val_targets"] = data["val_targets"]
+        data_splits["test_targets"] = data["test_targets"]
+        print(f"Including targets in data loaders: train={data['train_targets'].shape}, val={data['val_targets'].shape}, test={data['test_targets'].shape}")
+    
     data_loaders = get_data_loaders(
-        data, batch_size=params.batch_size, shuffle_train=params.shuffle_train
+        data_splits, batch_size=params.batch_size, shuffle_train=params.shuffle_train
     )
 
     train_loader = data_loaders["train"]
@@ -380,6 +389,7 @@ def main():
                 project=params.wandb_project,
                 entity=params.wandb_entity,
                 tags=wandb_tags,
+                notes=getattr(params, 'wandb_notes', ''),
             )
             
             # Override params with sweep hyperparameters
@@ -422,6 +432,7 @@ def main():
             project=params.wandb_project,
             entity=params.wandb_entity,
             tags=wandb_tags,
+            notes=getattr(params, 'wandb_notes', ''),
         )
         
         # Continue with training

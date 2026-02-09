@@ -180,6 +180,7 @@ def generate_logx_logr0(out_path=PROJECT_ROOT / "data/phase_2_log_x_log_alpha_64
     torch.save(X, out_path)
     print(f"Saved tensor of shape {tuple(X.shape)} to {out_path}")
 
+
 def generate_phase4_combo(out_path=PROJECT_ROOT / "data/phase_4_all_log_160x_40alpha_40T.pt",
                           seed=42, n_x=160, n_alpha=40, n_T=40):
     """
@@ -250,17 +251,38 @@ def generate_phase4_small(out_path=PROJECT_ROOT / "data/phase_4_small_range.pt",
     """
     torch.manual_seed(seed)
 
+    T_max = 10.0
+    T_min = 1.0
+    log_T = True
+    r0_max = 2.5e-10
+    r0_min = 5e-11
+    log_alpha = True
+    x_max = 1.0
+    x_min = 1e-4
+    log_x = True
+
     # x: logspace from 1e-4 to 1.0 (avoid extreme small x where η blows up)
-    x = torch.logspace(math.log10(1e-4), math.log10(1.0), steps=n_x).unsqueeze(1)
+    if log_x:
+        x_min = (x_min if x_min > 0 else 1e-6)  # avoid log(0)
+        x = torch.logspace(math.log10(x_min), math.log10(x_max), steps=n_x).unsqueeze(1)
+    else:
+        x = torch.linspace(x_min, x_max, steps=n_x).unsqueeze(1)
 
     # alpha: small range (r0 from 5e-11 to 2.5e-10 m -> alpha ~ 1 to 5)
-    r0 = torch.logspace(math.log10(5e-11), math.log10(2.5e-10), steps=n_alpha).unsqueeze(1)
+    if log_alpha:
+        r0 = torch.logspace(math.log10(r0_min), math.log10(r0_max), steps=n_alpha).unsqueeze(1)
+    else:
+        r0 = torch.linspace(r0_min, r0_max, steps=n_alpha).unsqueeze(1)
     a0 = 5.291772105e-11  # Bohr radius in meters
     b = 0.25 * (4.5 * math.pi**2)**(1/3) * a0
     alpha = r0 / b
+    min_alpha, max_alpha = alpha.min().item(), alpha.max().item()
 
     # T: narrow range 1 to 10 keV (reduces γ variation)
-    T_kV = torch.logspace(math.log10(1.0), math.log10(10.0), steps=n_T).unsqueeze(1)
+    if log_T:
+        T_kV = torch.logspace(math.log10(T_min), math.log10(T_max), steps=n_T).unsqueeze(1)
+    else:
+        T_kV = torch.linspace(T_min, T_max, steps=n_T).unsqueeze(1)
 
     # Build Cartesian product
     Nx, Na, Nt = x.shape[0], alpha.shape[0], T_kV.shape[0]
@@ -274,9 +296,9 @@ def generate_phase4_small(out_path=PROJECT_ROOT / "data/phase_4_small_range.pt",
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     torch.save(X, out_path)
     print(f"Saved Phase 4 (small range) tensor of shape {tuple(X.shape)} to {out_path}")
-    print(f"  x: {n_x} points in logspace [1e-4, 1.0]")
-    print(f"  alpha: {n_alpha} points (~1 to 5)")
-    print(f"  T: {n_T} points in logspace [1, 10] keV")
+    print(f"  x: {n_x} points in {'logspace' if log_x else 'linspace'} [{x_min}, {x_max}]")
+    print(f"  alpha: {n_alpha} points ({min_alpha:.2f} to {max_alpha:.2f})")
+    print(f"  T: {n_T} points in {'logspace' if log_T else 'linspace'} [{T_min}, {T_max}] keV")
     print(f"  Total: {X.shape[0]} points")
 
 

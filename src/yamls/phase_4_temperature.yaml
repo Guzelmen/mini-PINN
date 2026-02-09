@@ -8,16 +8,24 @@ base_config: &BASE_CONFIG
     ## parameters
   random_seed: 42
 
+  run_name: "checking_hybrid_again"
+  wandb_notes: "Testing 1000 ep with best sweep model but 64 hidden dim. Global relative L2 residual loss.
+                Reverted norm for fd integrals, data & PDE hybrid, weighted equally. 
+                Small range data (alpha ~1-5, T 1-10 keV) used from phase_4_solver_inp&targets_smallrange.pt"
+  ## wandb parameters
+  wandb_group: "week02feb"
+  wandb_project: "mini_pinn"
+  wandb_entity: "guzelmen_msci_project"
+
   phase: 4 # temperature-dependent TF
-  run_name: "phase4_HYBRID_test_best_sweep_config"
   n_vars: 3  # network inputs
-  debug_mode: False
+  debug_mode: True
 
   ## model parameters
   mode: "hard" # "soft" or "hard"
   inp_dim: 3  
   nlayers: 6
-  hidden: 128  # larger network for 3D input
+  hidden: 64
   activation: "SiLU" # SiLU, Tanh, ReLU, Identity, SIREN, GELU, Mish
   w0: 30
   add_phi0: False
@@ -27,12 +35,6 @@ base_config: &BASE_CONFIG
   # m=-0.5 is equivalent to no m-weighting (baseline)
   use_m_loss: True
   m_loss_m_value: -0.5  # sweep values: -0.5, 0, 0.5, 1.0
-  
-  # Residual normalization strategy for training
-  # "coeff": divide by λ³/γ (current default)
-  # "relative": divide by max(|LHS|, |RHS|) - per-sample relative error  
-  # "rhs_only": divide by |RHS|
-  residual_norm_strategy: "coeff"
 
   ## normalisation (alpha)
   norm_mode: "standardize"   # minmax or standardize
@@ -45,12 +47,6 @@ base_config: &BASE_CONFIG
   T_mean: 0.0
   T_std: 1.0
 
-  ## wandb parameters
-  wandb_group: "week26jan"
-  wandb_project: "mini_pinn"
-  wandb_entity: "guzelmen_msci_project"
-  wandb_tags: ["hybrid", "smallrange", "fixed_weights"]
-
   ## optimizer parameters
   lr_type: "cosine" # constant, linear, linear with cosine decay...
   constant_lr: 1e-4
@@ -62,6 +58,12 @@ base_config: &BASE_CONFIG
 
   ## loss parameters
   loss_type: "mse"
+  # Residual normalization strategy for training
+  # "coeff": divide by λ³/γ (current default)
+  # "relative": divide by max(|LHS|, |RHS|) - per-sample relative error  
+  # "rel_l2": divide by RHS L2 norm (over batch) - global relative L2 error"
+  residual_norm_strategy: "rel_l2"
+  
   fmt_help: False
   loss_strategy: "fixed" # "fixed" or "adaptive"
   fmt_weights: {"residual": 1.0, "fmt": 1.0}
@@ -70,25 +72,25 @@ base_config: &BASE_CONFIG
   ## hybrid training (data + physics loss)
   hybrid_training: True  # If True, combine PDE loss with data loss
   use_solver_data: True  # If True, load data in {inputs, targets} format
+  data_loss_type: "rel_l2"  # options: "mse", "rel_l2"
   physics_loss_weight: 1.0  # Weight for PDE residual loss
   data_loss_weight: 1.0     # Weight for data MSE loss
   hybrid_weight_strategy: "fixed"  # "fixed" or "adaptive"
 
   ## data parameters
-  # Phase 4 SMALL range: [x, alpha, T_kV] with 160x20x20 = 64k points
-  data_path: "data/phase_4_small_range.pt"
+  data_path: "data/phase_4_solver_inp&targets_smallrange.pt"
   batch_size: 2048
   shuffle_train: True
 
   ## training parameters
   stage: "train"
   epochs: 5
-  save_preds: False
-  save_every: 100
 
   # saving
+  save_preds: False
+  save_every: 100
   plot_auto: False
-  save_weights: False
+  save_weights: True
   save_weights_every: 100
   pred_dir: "predictions"
   plot_dir: "plot_predictions"
