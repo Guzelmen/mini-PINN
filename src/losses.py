@@ -625,14 +625,17 @@ def compute_residual_loss_phase4(outputs, inputs, params, val_stage: bool = Fals
     coeff = (lam ** 3) / gamma
 
     if val_stage:
-        # VALIDATION: Fixed coeff normalization, no m-weighting
+        # VALIDATION: Always use rel_l2 normalization, no m-weighting
         # Raw residual: d²ψ/dx² - (λ³/γ) · x · I_{1/2}(η)
         rhs = coeff * x * fd_half
         residual = d2phi_dx2 - rhs
-        norm_residual = residual / coeff
-        
+        # Divide by |rhs| per-sample
+        scale = torch.abs(rhs) + 1e-8
+        norm_residual = residual / scale
+
         if getattr(params, "debug_mode", False):
             print(f"[Phase4 loss VAL] coeff (λ³/γ): min={coeff.min().item():.6g}, max={coeff.max().item():.6g}")
+            print(f"[Phase4 loss VAL] rhs: min={rhs.min().item():.6g}, max={rhs.max().item():.6g}")
             print(f"[Phase4 loss VAL] norm_residual: min={norm_residual.min().item():.6g}, max={norm_residual.max().item():.6g}")
     else:
         # TRAINING: Apply m-weighting and chosen normalization strategy
@@ -664,6 +667,10 @@ def compute_residual_loss_phase4(outputs, inputs, params, val_stage: bool = Fals
             norm_residual = raw_residual / scale
         elif norm_strategy == "rhs_only":
             # Divide by |RHS| - RHS is always positive
+            scale = torch.abs(RHS) + 1e-8
+            norm_residual = raw_residual / scale
+        elif norm_strategy == "rel_l2":
+            # Divide by |RHS| per-sample (same as rhs_only)
             scale = torch.abs(RHS) + 1e-8
             norm_residual = raw_residual / scale
         else:
@@ -701,17 +708,18 @@ def compute_bc_loss_2_phase4(outputs, inputs):
     return compute_bc_loss_2_phase1(outputs, inputs)
 
 
-def compute_data_loss_phase4(outputs, targets, params):
+def compute_data_loss_phase4(outputs, targets, params, val_stage=False):
     """
-    Compute data loss: MSE between network predictions and ground truth.
-    
+    Compute data loss: MSE or relative L2 between network predictions and ground truth.
+
     Args:
         outputs: ψ(x) predictions from network, shape [batch, 1]
         targets: ψ_true(x) from numerical solver, shape [batch, 1]
-        params: config with loss_type, debug_mode, etc.
-        
+        params: config with data_loss_type, debug_mode, etc.
+        val_stage: if True, always use rel_l2 normalization
+
     Returns:
-        data_loss: MSE between outputs and targets
+        data_loss: MSE or relative L2 loss between outputs and targets
     """
     # Ensure shapes match
     if len(outputs.shape) == 2 and outputs.shape[1] == 1:
@@ -720,23 +728,34 @@ def compute_data_loss_phase4(outputs, targets, params):
         psi_pred = outputs.unsqueeze(1)
     else:
         psi_pred = outputs
-        
+
     if len(targets.shape) == 1:
         psi_true = targets.unsqueeze(1)
     else:
         psi_true = targets
-    
-    # Compute MSE
-    if params.loss_type == "mse":
-        loss = torch.mean((psi_pred - psi_true) ** 2)
+
+    # Determine loss type: always rel_l2 for validation, otherwise check config
+    if val_stage:
+        data_loss_type = "rel_l2"
     else:
-        raise ValueError(f"Unknown loss_type: {params.loss_type}")
-    
+        data_loss_type = getattr(params, "data_loss_type", "mse")
+
+    # Compute data loss
+    if data_loss_type == "mse":
+        loss = torch.mean((psi_pred - psi_true) ** 2)
+    elif data_loss_type == "rel_l2":
+        # Per-sample relative error: divide by |true| then mean of squared errors
+        scale = torch.abs(psi_true) + 1e-8
+        loss = torch.mean(((psi_pred - psi_true) / scale) ** 2)
+    else:
+        raise ValueError(f"Unknown data_loss_type: {loss_type}")
+
     if getattr(params, "debug_mode", False):
+        print(f"[Phase4 data loss {'VAL' if val_stage else 'TRAIN'}] loss_type={data_loss_type}")
         print(f"[Phase4 data loss] ψ_pred: min={psi_pred.min().item():.6g}, max={psi_pred.max().item():.6g}")
         print(f"[Phase4 data loss] ψ_true: min={psi_true.min().item():.6g}, max={psi_true.max().item():.6g}")
-        print(f"[Phase4 data loss] MSE: {loss.item():.6g}")
-    
+        print(f"[Phase4 data loss] loss: {loss.item():.6g}")
+
     return loss
 
 

@@ -309,13 +309,13 @@ def trainer(
 
             # Compute data loss for hybrid training
             if hybrid_training and targets is not None:
-                data_loss = losses.compute_data_loss_phase4(outputs, targets, params)
+                data_loss = losses.compute_data_loss_phase4(outputs, targets, params, val_stage=False)
                 loss_dict['data'] = data_loss
             else:
                 data_loss = torch.tensor(0.0, device=outputs.device)
 
             # For adaptive weighting: collect raw losses, don't update weights yet
-            if weighter.strategy == 'adaptive':
+            if weighter.strategy == 'adaptive' or weighter.hybrid_strategy == 'adaptive':
                 raw_losses_for_weighting['residual'].append(
                     residual_loss.detach())
                 raw_losses_for_weighting['bc_1'].append(bc_1_loss.detach())
@@ -421,7 +421,7 @@ def trainer(
         print("Min and max data loss:", np.min(epoch_losses['data']) if 'data' in epoch_losses and len(epoch_losses['data']) > 0 else 'N/A', np.max(epoch_losses['data']) if 'data' in epoch_losses and len(epoch_losses['data']) > 0 else 'N/A')
         avg_physics = np.mean(epoch_losses['physics']) if 'physics' in epoch_losses and len(epoch_losses['physics']) > 0 else 0.0
 
-        # Update weights once per epoch for adaptive strategy
+        # Update physics sub-loss weights once per epoch for adaptive strategy
         if weighter.strategy == 'adaptive':
             avg_losses_for_weighting = {
                 'residual': torch.stack(raw_losses_for_weighting['residual']).mean(),
@@ -430,11 +430,25 @@ def trainer(
             }
             if getattr(params, "fmt_help", False) and len(raw_losses_for_weighting['fmt']) > 0:
                 avg_losses_for_weighting['fmt'] = torch.stack(raw_losses_for_weighting['fmt']).mean()
-            if getattr(params, 'hybrid_training', False) and len(raw_losses_for_weighting.get('data', [])) > 0:
-                avg_losses_for_weighting['data'] = torch.stack(raw_losses_for_weighting['data']).mean()
-                avg_losses_for_weighting['physics_total'] = avg_losses_for_weighting['residual']  # Simplified
             weighter.update_weights(avg_losses_for_weighting)
-            # Reset collection for next epoch
+
+        # Update hybrid weights (physics vs data) - independent of physics sub-loss strategy
+        if weighter.hybrid_training and weighter.hybrid_strategy == 'adaptive':
+            if len(raw_losses_for_weighting.get('data', [])) > 0:
+                hybrid_loss_dict = {}
+                hybrid_loss_dict['data'] = torch.stack(raw_losses_for_weighting['data']).mean()
+                res_avg = torch.stack(raw_losses_for_weighting['residual']).mean()
+                bc1_avg = torch.stack(raw_losses_for_weighting['bc_1']).mean()
+                bc2_avg = torch.stack(raw_losses_for_weighting['bc_2']).mean()
+                hybrid_loss_dict['physics_total'] = (
+                    weighter.residual_weight * res_avg
+                    + weighter.bc_1_weight * bc1_avg
+                    + weighter.bc_2_weight * bc2_avg
+                )
+                weighter.update_weights(hybrid_loss_dict)
+
+        # Reset collection for next epoch
+        if weighter.strategy == 'adaptive' or weighter.hybrid_strategy == 'adaptive':
             raw_losses_for_weighting = {'residual': [], 'bc_1': [], 'bc_2': []}
             if getattr(params, "fmt_help", False):
                 raw_losses_for_weighting['fmt'] = []
