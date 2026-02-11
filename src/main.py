@@ -261,6 +261,7 @@ def run_training(params):
             f"(mode={mode}, phase={phase}).")
     ModelClass = getattr(models, model_class_name)
     model = ModelClass(params)
+    model.to(params.device)
 
     if params.stage == "train":
         # train the model
@@ -364,6 +365,14 @@ def main():
     parser.add_argument("--hpc_mem", required=False, default=None, help="Memory requested (e.g. 8gb)")
     args = parser.parse_args()
 
+    # Set PyTorch thread count to match allocated CPUs (only on HPC)
+    if args.hpc_ncpus is not None:
+        torch.set_num_threads(int(args.hpc_ncpus))
+
+    # Auto-detect device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
     # Check if running in sweep mode
     sweep_id = args.sweep or os.environ.get("SWEEP_ID")
     base_config_name = args.base_config or os.environ.get("BASE_CONFIG")
@@ -414,6 +423,7 @@ def main():
             params.hpc_nodes = args.hpc_nodes
             params.hpc_ncpus = args.hpc_ncpus
             params.hpc_mem = args.hpc_mem
+            params.device = device
 
             # Continue with training
             run_training(params)
@@ -452,6 +462,7 @@ def main():
         params.hpc_nodes = args.hpc_nodes
         params.hpc_ncpus = args.hpc_ncpus
         params.hpc_mem = args.hpc_mem
+        params.device = device
 
         # Continue with training
         run_training(params)

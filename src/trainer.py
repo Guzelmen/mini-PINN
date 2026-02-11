@@ -14,6 +14,7 @@ from tqdm import tqdm
 import wandb
 import pickle
 import json
+import resource
 
 
 def get_constant_scheduler(optimizer):
@@ -107,6 +108,7 @@ def trainer(
     params,
     prelim_time=0.0,
 ):
+    device = getattr(params, "device", torch.device("cpu"))
     epochs = params.epochs
 
     # Initialize LossWeighter
@@ -239,14 +241,14 @@ def trainer(
             # Extract inputs (and targets if present in data)
             # DataLoader returns a tuple. If TensorDataset has 2 tensors, batch is (inputs, targets)
             # If TensorDataset has 1 tensor, batch is (inputs,)
-            inputs = batch[0]  # Unpack tuple from DataLoader
+            inputs = batch[0].to(device)  # Unpack tuple from DataLoader
             if params.debug_mode:
                 print(f"Batch input shape: {inputs.shape}")
                 print(f"Batch length: {len(batch)}")
-            
+
             # Check if we have targets in the batch
             if len(batch) > 1:
-                targets = batch[1]
+                targets = batch[1].to(device)
                 if params.debug_mode:
                     print(f"Batch targets shape: {targets.shape}")
             else:
@@ -590,11 +592,11 @@ def trainer(
                 # Extract inputs (and targets if present in data)
                 # DataLoader returns a tuple. If TensorDataset has 2 tensors, batch is (inputs, targets)
                 # If TensorDataset has 1 tensor, batch is (inputs,)
-                inputs = batch[0]  # Unpack tuple from DataLoader
-                
+                inputs = batch[0].to(device)  # Unpack tuple from DataLoader
+
                 # Check if we have targets in the batch
                 if len(batch) > 1:
-                    targets = batch[1]
+                    targets = batch[1].to(device)
                 else:
                     targets = None
                 
@@ -722,24 +724,29 @@ def trainer(
     # Compute global summary (mean and std of each metric across all epochs)
     ta_metric_names = ["prefwd", "fwd", "loss", "backprop", "optim_step"]
     ta_summary = {
-        "compute": {
+        "compute_specs": {
             "hpc_nodes": getattr(params, "hpc_nodes", None),
             "hpc_ncpus": getattr(params, "hpc_ncpus", None),
-            "hpc_mem": getattr(params, "hpc_mem", None),
+            "hpc_mem": getattr(params, "hpc_mem", None)},
+            "hpc_ngpus": getattr(params, "hpc_ngpus", None),
+        "compute_used": {
+            "device": str(device),
+            "torch_num_threads": torch.get_num_threads(),
+            "peak_mem_gb": round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 * 1024), 2)
         },
-        "prelim_time": time_analysis_dict["prelim_time"],
+        "prelim_time": round(time_analysis_dict["prelim_time"], 4),
     }
     for ta_metric in ta_metric_names:
         ta_epoch_sums = [time_analysis_dict[ep][f"{ta_metric}_sum"]
                          for ep in range(1, epochs + 1)]
-        ta_summary[f"{ta_metric}_global_mean"] = float(np.mean(ta_epoch_sums))
-        ta_summary[f"{ta_metric}_global_std"] = float(np.std(ta_epoch_sums))
+        ta_summary[f"{ta_metric}_global_mean"] = round(float(np.mean(ta_epoch_sums)), 4)
+        ta_summary[f"{ta_metric}_global_std"] = round(float(np.std(ta_epoch_sums)), 4)
 
     # epoch_total is a single value per epoch (not per-batch), so average directly
     ta_epoch_totals = [time_analysis_dict[ep]["epoch_total"]
                        for ep in range(1, epochs + 1)]
-    ta_summary["epoch_total_global_mean"] = float(np.mean(ta_epoch_totals))
-    ta_summary["epoch_total_global_std"] = float(np.std(ta_epoch_totals))
+    ta_summary["epoch_total_global_mean"] = round(float(np.mean(ta_epoch_totals)), 4)
+    ta_summary["epoch_total_global_std"] = round(float(np.std(ta_epoch_totals)), 4)
 
     ta_json_path = ta_dir / "time_analysis_summary.json"
     with open(ta_json_path, "w") as f:

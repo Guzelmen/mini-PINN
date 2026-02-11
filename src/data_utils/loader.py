@@ -288,12 +288,13 @@ def get_data_loaders(data_dict, batch_size, shuffle_train):
         test_dataset = TensorDataset(data_dict['test'])
         print("DataLoaders created with inputs only")
 
-    # Create data loaders
+    # Create data loaders (pin_memory speeds up CPU→GPU transfer)
+    pin = torch.cuda.is_available()
     train_loader = DataLoader(
-        train_dataset, batch_size=batch_size, shuffle=shuffle_train)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+        train_dataset, batch_size=batch_size, shuffle=shuffle_train, pin_memory=pin)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, pin_memory=pin)
     test_loader = DataLoader(
-        test_dataset, batch_size=batch_size, shuffle=False)
+        test_dataset, batch_size=batch_size, shuffle=False, pin_memory=pin)
 
     return {
         'train': train_loader,
