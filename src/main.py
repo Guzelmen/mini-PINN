@@ -20,11 +20,14 @@ import argparse
 import wandb
 from .YParams import YParams
 from .utils import PROJECT_ROOT
+import time
 import warnings
 
 warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
 
 def run_training(params):
+    t_prelim_start = time.time()
+
     # Log all hyperparameters from config
     # Convert params to dict to ensure all parameters are captured
     config_dict = {}
@@ -261,7 +264,9 @@ def run_training(params):
 
     if params.stage == "train":
         # train the model
-        trainer(model, train_loader, val_loader, params)
+        t_prelim_end = time.time()
+        prelim_time = t_prelim_end - t_prelim_start
+        trainer(model, train_loader, val_loader, params, prelim_time=prelim_time)
         
         # Plotting (only if plot_auto is True)
         if params.plot_auto and params.save_preds:
@@ -354,6 +359,9 @@ def main():
     parser.add_argument("--config", required=False, help="Config file name (for regular training)")
     parser.add_argument("--sweep", required=False, help="Sweep ID (for sweep mode)")
     parser.add_argument("--base_config", required=False, help="Base config name (for sweep mode)")
+    parser.add_argument("--hpc_nodes", required=False, default=None, help="Number of HPC nodes")
+    parser.add_argument("--hpc_ncpus", required=False, default=None, help="Number of CPUs per node")
+    parser.add_argument("--hpc_mem", required=False, default=None, help="Memory requested (e.g. 8gb)")
     args = parser.parse_args()
 
     # Check if running in sweep mode
@@ -402,9 +410,14 @@ def main():
             params.run_name = f"{params.run_name}_sweep_{run.id[:8]}"
             run.name = params.run_name  # Update the wandb run name
             
+            # Store HPC resource info from CLI args
+            params.hpc_nodes = args.hpc_nodes
+            params.hpc_ncpus = args.hpc_ncpus
+            params.hpc_mem = args.hpc_mem
+
             # Continue with training
             run_training(params)
-        
+
         # Run sweep agent
         wandb.agent(sweep_id, function=train_sweep, project="mini_pinn", entity="guzelmen_msci_project")
         
@@ -435,6 +448,11 @@ def main():
             notes=getattr(params, 'wandb_notes', ''),
         )
         
+        # Store HPC resource info from CLI args
+        params.hpc_nodes = args.hpc_nodes
+        params.hpc_ncpus = args.hpc_ncpus
+        params.hpc_mem = args.hpc_mem
+
         # Continue with training
         run_training(params)
 

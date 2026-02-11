@@ -13,6 +13,7 @@ from . import losses
 from tqdm import tqdm
 import wandb
 import pickle
+import json
 
 
 def get_constant_scheduler(optimizer):
@@ -104,6 +105,7 @@ def trainer(
     train,
     val,
     params,
+    prelim_time=0.0,
 ):
     epochs = params.epochs
 
@@ -175,6 +177,10 @@ def trainer(
         if getattr(params, "use_m_loss", False):
             print(f"m loss enabled with constant m={current_m:.3f}")
     
+    # ------ Time analysis setup ------
+    time_analysis_dict = {}
+    time_analysis_dict["prelim_time"] = prelim_time
+
     for ep in range(1, epochs+1):
         time_start = time.time()
         
@@ -215,6 +221,13 @@ def trainer(
         epoch_grad_norms = []
         clipped_grad_norms = []
 
+        # Per-batch timing accumulators
+        batch_times_prefwd = []
+        batch_times_fwd = []
+        batch_times_loss = []
+        batch_times_backprop = []
+        batch_times_optim = []
+
         train_loader_iter = tqdm(
             train, desc=f"Epoch {ep}/{epochs}", leave=True, ncols=100)
 
@@ -222,6 +235,7 @@ def trainer(
         hybrid_training = getattr(params, 'hybrid_training', False)
 
         for batch in train_loader_iter:
+            t_ta_prefwd = time.time()
             # Extract inputs (and targets if present in data)
             # DataLoader returns a tuple. If TensorDataset has 2 tensors, batch is (inputs, targets)
             # If TensorDataset has 1 tensor, batch is (inputs,)
@@ -252,7 +266,9 @@ def trainer(
                 T = inputs[:, 2:3].clone()
 
             # Forward pass
+            t_ta_fwd = time.time()
             outputs = model(inputs)
+            t_ta_loss = time.time()
 
             if ep % params.save_every == 0:
                 # Detach tensors before saving to avoid gradient tracking issues
@@ -336,6 +352,7 @@ def trainer(
             total_loss = totloss_fn(loss_dict, weighter)
 
             # Backpropagation
+            t_ta_bp = time.time()
             optimizer.zero_grad()
             total_loss.backward()
 
@@ -352,6 +369,7 @@ def trainer(
                 print(f"[Batch {train_loader_iter.n}] Gradient Norm ALERT: {total_grad_norm_before:.4e}")
 
             # Record gradient norm before stepping
+            t_ta_optim = time.time()
             total_grad_sq = 0.0
             num_params_with_grad = 0
             for p in model.parameters():
@@ -364,9 +382,31 @@ def trainer(
 
             # Clip gradients to prevent explosion, if activated
             if getattr(params, "grad_clipping", False):
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
+                max_norm = getattr(params, "clip_value", 10.0)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_norm)
+
+            # Sanity check: record grads to ensure they are clipped
+            if getattr(params, "grad_clipping", False):
+                total_grad_norm_after = 0.0
+                for p in model.parameters():
+                    if p.grad is not None:
+                        param_norm = p.grad.detach().data.norm(2)
+                        total_grad_norm_after += param_norm.item() ** 2
+                total_grad_norm_after = total_grad_norm_after ** 0.5
+                clipped_grad_norms.append(total_grad_norm_after)
+
+                # Print if clipping was active and made a difference
+                if total_grad_norm_before > max_norm and params.debug_mode is True:
+                    print(f"[Batch {train_loader_iter.n}] Gradient clipping applied: {total_grad_norm_before:.4e} -> {total_grad_norm_after:.4e}")
 
             optimizer.step()
+            t_ta_batch_end = time.time()
+
+            batch_times_prefwd.append(t_ta_fwd - t_ta_prefwd)
+            batch_times_fwd.append(t_ta_loss - t_ta_fwd)
+            batch_times_loss.append(t_ta_bp - t_ta_loss)
+            batch_times_backprop.append(t_ta_optim - t_ta_bp)
+            batch_times_optim.append(t_ta_batch_end - t_ta_optim)
 
             # Track losses
             epoch_losses['residual'].append(residual_loss.item())
@@ -389,6 +429,15 @@ def trainer(
                 bc2=bc_2_loss.item(),
                 data=data_loss.item() if hybrid_training else 0.0
             )
+
+        # ------ Time analysis: per-epoch statistics (sums across batches) ------
+        time_analysis_dict[ep] = {
+            "prefwd_sum": float(np.sum(batch_times_prefwd)),
+            "fwd_sum": float(np.sum(batch_times_fwd)),
+            "loss_sum": float(np.sum(batch_times_loss)),
+            "backprop_sum": float(np.sum(batch_times_backprop)),
+            "optim_step_sum": float(np.sum(batch_times_optim)),
+        }
 
         if ep % params.save_every == 0:
             # Concatenate tensors first, then convert to numpy
@@ -462,6 +511,7 @@ def trainer(
 
         time_end = time.time()
         time_taken = time_end - time_start
+        time_analysis_dict[ep]["epoch_total"] = time_taken
 
         # Print epoch summary
         print(
@@ -500,6 +550,7 @@ def trainer(
             grad_stats = {
                 "grads/epoch_grad_norm_mean": float(np.mean(epoch_grad_norms)),
                 "grads/epoch_grad_norm_max": float(np.max(epoch_grad_norms)),
+                "grads/clipped_epoch_grad_norm_mean": float(np.mean(clipped_grad_norms)) if len(clipped_grad_norms) > 0 else None,
             }
 
         # Log to wandb
@@ -657,5 +708,42 @@ def trainer(
             pickle.dump(predictions, f)
 
         print(f"Saved predictions for all selected epochs to {save_path}")
+
+    # ------ Time analysis: save results ------
+    ta_dir = PROJECT_ROOT / "time_analysis" / f"{params.run_name}"
+    ta_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save full nested dict as pickle
+    ta_pkl_path = ta_dir / "time_analysis.pkl"
+    with open(ta_pkl_path, "wb") as f:
+        pickle.dump(time_analysis_dict, f)
+    print(f"Saved time analysis data to {ta_pkl_path}")
+
+    # Compute global summary (mean and std of each metric across all epochs)
+    ta_metric_names = ["prefwd", "fwd", "loss", "backprop", "optim_step"]
+    ta_summary = {
+        "compute": {
+            "hpc_nodes": getattr(params, "hpc_nodes", None),
+            "hpc_ncpus": getattr(params, "hpc_ncpus", None),
+            "hpc_mem": getattr(params, "hpc_mem", None),
+        },
+        "prelim_time": time_analysis_dict["prelim_time"],
+    }
+    for ta_metric in ta_metric_names:
+        ta_epoch_sums = [time_analysis_dict[ep][f"{ta_metric}_sum"]
+                         for ep in range(1, epochs + 1)]
+        ta_summary[f"{ta_metric}_global_mean"] = float(np.mean(ta_epoch_sums))
+        ta_summary[f"{ta_metric}_global_std"] = float(np.std(ta_epoch_sums))
+
+    # epoch_total is a single value per epoch (not per-batch), so average directly
+    ta_epoch_totals = [time_analysis_dict[ep]["epoch_total"]
+                       for ep in range(1, epochs + 1)]
+    ta_summary["epoch_total_global_mean"] = float(np.mean(ta_epoch_totals))
+    ta_summary["epoch_total_global_std"] = float(np.std(ta_epoch_totals))
+
+    ta_json_path = ta_dir / "time_analysis_summary.json"
+    with open(ta_json_path, "w") as f:
+        json.dump(ta_summary, f, indent=2)
+    print(f"Saved time analysis summary to {ta_json_path}")
 
     return
