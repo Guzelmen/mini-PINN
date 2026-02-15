@@ -8,18 +8,16 @@ base_config: &BASE_CONFIG
     ## parameters
   random_seed: 42
 
-  run_name: "checking_hybrid_again"
-  wandb_notes: "Testing 1000 ep with best sweep model but 64 hidden dim. Global relative L2 residual loss.
-                Reverted norm for fd integrals, data & PDE hybrid, weighted equally. 
-                Small range data (alpha ~1-5, T 1-10 keV) used from phase_4_solver_inp&targets_smallrange.pt"
+  run_name: "GPU_adaptcosinenormal_5000ep_physweightsched"
+  wandb_notes: ""
   ## wandb parameters
-  wandb_group: "week02feb"
+  wandb_group: "week09feb"
   wandb_project: "mini_pinn"
   wandb_entity: "guzelmen_msci_project"
 
   phase: 4 # temperature-dependent TF
   n_vars: 3  # network inputs
-  debug_mode: True
+  debug_mode: False
 
   ## model parameters
   mode: "hard" # "soft" or "hard"
@@ -48,13 +46,16 @@ base_config: &BASE_CONFIG
   T_std: 1.0
 
   ## optimizer parameters
-  lr_type: "cosine" # constant, linear, linear with cosine decay...
+  lr_type: "cosine" # constant, linear, cosine, cosine_restarts
   constant_lr: 1e-4
   start_lr: 1e-5
   end_lr: 5e-4
-  lr_warmup_epochs: 100
+  lr_warmup_epochs: 200
   min_lr: 1e-5  # Minimum LR for cosine decay
-  grad_clipping: True  # Clips to max_norm=10.0
+  # cosine_decay_epochs: 2000  # Fixed cosine decay period (omit to use total_epochs - warmup)
+  # cosine_restart_period: 500  # Epochs per cycle for lr_type="cosine_restarts"
+  grad_clipping: True  # Clips to max_norm
+  clip_value: 10.0
 
   ## loss parameters
   loss_type: "mse"
@@ -74,7 +75,8 @@ base_config: &BASE_CONFIG
   use_solver_data: True  # If True, load data in {inputs, targets} format
   data_loss_type: "rel_l2"  # options: "mse", "rel_l2"
   physics_loss_weight: 1.0  # Weight for PDE residual loss
-  data_loss_weight: 1.0     # Weight for data MSE loss
+  data_loss_weight: 10.0     # Weight for data MSE loss
+  data_loss_step_epochs: 500
   hybrid_weight_strategy: "fixed"  # "fixed" or "adaptive"
 
   ## data parameters
@@ -84,7 +86,7 @@ base_config: &BASE_CONFIG
 
   ## training parameters
   stage: "train"
-  epochs: 5
+  epochs: 5000
 
   # saving
   save_preds: False

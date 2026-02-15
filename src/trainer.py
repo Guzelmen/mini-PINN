@@ -59,7 +59,8 @@ def get_warmup_linear_scheduler(optimizer, warmup_epochs, start_lr, end_lr):
 
 
 def get_warmup_cosine_scheduler(optimizer, warmup_epochs, start_lr,
-                                end_lr, min_lr, total_epochs):
+                                end_lr, min_lr, total_epochs,
+                                cosine_decay_epochs=None):
     """
     Create a learning rate scheduler with linear warmup followed by cosine decay.
 
@@ -70,16 +71,25 @@ def get_warmup_cosine_scheduler(optimizer, warmup_epochs, start_lr,
         end_lr: Peak learning rate (after warmup, start of cosine decay)
         min_lr: Minimum learning rate for cosine decay
         total_epochs: Total number of training epochs
+        cosine_decay_epochs: Fixed number of epochs for cosine decay phase.
+            If None (default), decay spans (total_epochs - warmup_epochs)
+            for backward compatibility. If set, cosine decays over exactly
+            this many epochs, then holds at min_lr for the remainder.
 
     Returns:
         LambdaLR scheduler
     """
+    # Determine cosine period: fixed if specified, else fill remaining epochs
+    if cosine_decay_epochs is not None:
+        _cosine_period = max(1, cosine_decay_epochs)
+    else:
+        _cosine_period = max(1, total_epochs - warmup_epochs)
+
     def lr_lambda(epoch):
         # Handle edge cases
         if warmup_epochs <= 0:
-            # Pure cosine from epoch 0 to total_epochs
-            cosine_period = max(1, total_epochs)
-            progress = min(max(epoch, 0), cosine_period) / cosine_period
+            # Pure cosine from epoch 0
+            progress = min(max(epoch, 0), _cosine_period) / _cosine_period
             return (min_lr / end_lr) + (1.0 - min_lr / end_lr) * (1 + math.cos(math.pi * progress)) / 2
 
         if epoch < warmup_epochs:
@@ -88,15 +98,46 @@ def get_warmup_cosine_scheduler(optimizer, warmup_epochs, start_lr,
             return (start_lr / end_lr) * (1 - warmup_ratio) + 1.0 * warmup_ratio
         else:
             # Cosine decay: from end_lr down to min_lr
-            # Progress from 0 to 1 over (total_epochs - warmup_epochs) epochs
             cosine_epoch = epoch - warmup_epochs
-            cosine_period = max(1, total_epochs - warmup_epochs)
-            progress = min(max(cosine_epoch, 0), cosine_period) / \
-                float(cosine_period)
+            progress = min(max(cosine_epoch, 0), _cosine_period) / \
+                float(_cosine_period)
             # Cosine annealing: goes from 1.0 to (min_lr/end_lr)
+            # After cosine_period, progress is clamped to 1.0 → holds at min_lr
             cosine_multiplier = (min_lr / end_lr) + (1.0 - min_lr /
                                                      end_lr) * (1 + math.cos(math.pi * progress)) / 2
             return cosine_multiplier
+
+    return LambdaLR(optimizer, lr_lambda)
+
+
+def get_warmup_cosine_restarts_scheduler(optimizer, warmup_epochs, start_lr,
+                                         end_lr, min_lr, restart_period):
+    """
+    Linear warmup followed by cosine annealing with warm restarts.
+
+    After warmup, the LR follows repeated cosine cycles: each cycle decays
+    from end_lr to min_lr over restart_period epochs, then snaps back to
+    end_lr for the next cycle.
+
+    Args:
+        optimizer: PyTorch optimizer
+        warmup_epochs: Number of epochs for linear warmup
+        start_lr: Starting LR for warmup
+        end_lr: Peak LR (base optimizer LR)
+        min_lr: Minimum LR at the bottom of each cosine cycle
+        restart_period: Number of epochs per cosine cycle
+    """
+    _period = max(1, restart_period)
+
+    def lr_lambda(epoch):
+        if warmup_epochs > 0 and epoch < warmup_epochs:
+            warmup_ratio = epoch / float(warmup_epochs)
+            return (start_lr / end_lr) * (1 - warmup_ratio) + 1.0 * warmup_ratio
+        else:
+            # Position within the current cosine cycle
+            cosine_epoch = (epoch - warmup_epochs) % _period
+            progress = cosine_epoch / float(_period)
+            return (min_lr / end_lr) + (1.0 - min_lr / end_lr) * (1 + math.cos(math.pi * progress)) / 2
 
     return LambdaLR(optimizer, lr_lambda)
 
@@ -128,6 +169,8 @@ def trainer(
     start_lr = params.start_lr
     end_lr = params.end_lr
     min_lr = params.min_lr
+    cosine_decay_epochs = params.get('cosine_decay_epochs', None)
+    restart_period = params.get('cosine_restart_period', None)
 
     # Initialize optimizer and scheduler based on lr_type
     if lr_type == "constant":
@@ -146,20 +189,40 @@ def trainer(
             f"then constant at {end_lr:.2e}")
 
     elif lr_type == "cos" or lr_type == "cosine":
-        # Linear warmup + cosine decay
+        # Linear warmup + cosine decay (+ optional hold at min_lr)
         optimizer = Adam(model.parameters(), lr=end_lr)
         scheduler = get_warmup_cosine_scheduler(
-            optimizer, warmup_epochs, start_lr, end_lr, min_lr, epochs)
+            optimizer, warmup_epochs, start_lr, end_lr, min_lr, epochs,
+            cosine_decay_epochs=cosine_decay_epochs)
+        decay_len = cosine_decay_epochs if cosine_decay_epochs is not None else (epochs - warmup_epochs)
+        schedule_msg = (
+            f"LR schedule: {warmup_epochs} epochs warmup ({start_lr:.2e} -> {end_lr:.2e}), "
+            f"then cosine decay to {min_lr:.2e} over {decay_len} epochs")
+        if cosine_decay_epochs is not None:
+            hold_epochs = max(0, epochs - warmup_epochs - cosine_decay_epochs)
+            schedule_msg += f", then hold at {min_lr:.2e} for {hold_epochs} epochs"
+        print(schedule_msg)
+
+    elif lr_type == "cosine_restarts":
+        # Linear warmup + repeated cosine cycles
+        if restart_period is None:
+            raise ValueError("lr_type='cosine_restarts' requires cosine_restart_period to be set")
+        optimizer = Adam(model.parameters(), lr=end_lr)
+        scheduler = get_warmup_cosine_restarts_scheduler(
+            optimizer, warmup_epochs, start_lr, end_lr, min_lr, restart_period)
+        n_restarts = max(0, (epochs - warmup_epochs) // restart_period - 1)
         print(
             f"LR schedule: {warmup_epochs} epochs warmup ({start_lr:.2e} -> {end_lr:.2e}), "
-            f"then cosine decay to {min_lr:.2e} over {epochs - warmup_epochs} epochs")
+            f"then cosine restarts ({end_lr:.2e} -> {min_lr:.2e}) every {restart_period} epochs "
+            f"(~{n_restarts} restarts over {epochs} epochs)")
+
     else:
         raise ValueError(
-            f"Unknown lr_type: {lr_type}. Choose from: constant, linear, cos/cosine")
+            f"Unknown lr_type: {lr_type}. Choose from: constant, linear, cos/cosine, cosine_restarts")
 
     predictions = {}
     # Ensure first epoch uses start_lr for warmup schedules without stepping scheduler before optimizer
-    if lr_type in ["linear", "cos", "cosine"] and warmup_epochs > 0:
+    if lr_type in ["linear", "cos", "cosine", "cosine_restarts"] and warmup_epochs > 0:
         optimizer.param_groups[0]["lr"] = start_lr
     
     # Initialize m decay strategy if update_m is enabled
@@ -179,6 +242,21 @@ def trainer(
         if getattr(params, "use_m_loss", False):
             print(f"m loss enabled with constant m={current_m:.3f}")
     
+    # Initialize data weight step-decay schedule
+    data_loss_step_epochs = params.get('data_loss_step_epochs', None)
+    if (data_loss_step_epochs is not None
+            and weighter.hybrid_training
+            and weighter.hybrid_strategy == 'fixed'
+            and weighter.data_weight > weighter.physics_weight):
+        n_steps = max(1, epochs // data_loss_step_epochs)
+        data_weight_decrement = (weighter.data_weight - weighter.physics_weight) / n_steps
+        print(
+            f"Data weight step-decay: {weighter.data_weight:.2f} -> {weighter.physics_weight:.2f} "
+            f"in {n_steps} steps (every {data_loss_step_epochs} epochs, "
+            f"decrement {data_weight_decrement:.4f})")
+    else:
+        data_weight_decrement = None
+
     # ------ Time analysis setup ------
     time_analysis_dict = {}
     time_analysis_dict["prelim_time"] = prelim_time
@@ -506,6 +584,13 @@ def trainer(
             if getattr(params, 'hybrid_training', False):
                 raw_losses_for_weighting['data'] = []
 
+        # Step-decay data weight at interval boundaries
+        if data_weight_decrement is not None and ep % data_loss_step_epochs == 0:
+            new_data_weight = max(weighter.physics_weight,
+                                  weighter.data_weight - data_weight_decrement)
+            print(f"Epoch {ep}: data_weight {weighter.data_weight:.4f} -> {new_data_weight:.4f}")
+            weighter.data_weight = new_data_weight
+
         # Update scheduler AFTER all batches (PyTorch best practice)
         scheduler.step()
         # Update for next epoch's logging
@@ -529,11 +614,11 @@ def trainer(
             if params.phase == 4:
                 # Phase 4 has 3 inputs: [x, alpha, T]
                 T_check = torch.tensor([[10.0]])  # Use 10 keV as test temperature
-                inp0 = torch.cat([x0, alpha_check, T_check], dim=-1).requires_grad_(True)
-                inp1 = torch.cat([x1, alpha_check, T_check], dim=-1).requires_grad_(True)
+                inp0 = torch.cat([x0, alpha_check, T_check], dim=-1).to(device).requires_grad_(True)
+                inp1 = torch.cat([x1, alpha_check, T_check], dim=-1).to(device).requires_grad_(True)
             else:
-                inp0 = torch.cat([x0, alpha_check], dim=-1).requires_grad_(True)
-                inp1 = torch.cat([x1, alpha_check], dim=-1).requires_grad_(True)
+                inp0 = torch.cat([x0, alpha_check], dim=-1).to(device).requires_grad_(True)
+                inp1 = torch.cat([x1, alpha_check], dim=-1).to(device).requires_grad_(True)
             psi0 = model(inp0)
             psi1 = model(inp1)
 
@@ -653,7 +738,7 @@ def trainer(
                 else:
                     val_data_loss = torch.tensor(0.0, device=outputs.device)
 
-                # Use weighter for consistent total loss (but don't update weights)
+                # Compute val total loss: unweighted sum (no hybrid weighting on val)
                 val_loss_dict = {
                     'residual': residual_loss,
                     'bc_1': bc_1_loss,
@@ -661,12 +746,18 @@ def trainer(
                 }
                 if getattr(params, "fmt_help", False):
                     val_loss_dict['fmt'] = fmt_loss
+
+                # Physics loss (residual + BCs) — use weighter for BC weights in soft mode
+                val_physics_loss = weighter.get_physics_loss(val_loss_dict) if hasattr(weighter, 'get_physics_loss') else residual_loss
                 if hybrid_training and targets is not None:
-                    val_loss_dict['data'] = val_data_loss
-                    val_physics_loss = weighter.get_physics_loss(val_loss_dict) if hasattr(weighter, 'get_physics_loss') else residual_loss
                     val_losses['physics'].append(val_physics_loss.item() if torch.is_tensor(val_physics_loss) else val_physics_loss)
-                val_total_loss = weighter.get_weighted_loss(val_loss_dict)
-                val_losses['total'].append(val_total_loss.item())
+
+                # Total = physics + data, unweighted (no physics_weight/data_weight)
+                if hybrid_training and targets is not None:
+                    val_total_loss = val_physics_loss + val_data_loss
+                else:
+                    val_total_loss = val_physics_loss
+                val_losses['total'].append(val_total_loss.item() if torch.is_tensor(val_total_loss) else val_total_loss)
 
             avg_val_residual = np.mean(val_losses['residual'])
             avg_val_bc1 = np.mean(val_losses['bc_1'])
@@ -722,31 +813,37 @@ def trainer(
     print(f"Saved time analysis data to {ta_pkl_path}")
 
     # Compute global summary (mean and std of each metric across all epochs)
+    # Time unit conversion: raw values are in seconds, convert if requested
+    ta_time_unit = getattr(params, "time_unit", "seconds")
+    ta_time_scales = {"seconds": 1.0, "ms": 1000.0, "minutes": 1.0 / 60.0}
+    ta_scale = ta_time_scales.get(ta_time_unit, 1.0)
+
     ta_metric_names = ["prefwd", "fwd", "loss", "backprop", "optim_step"]
     ta_summary = {
         "compute_specs": {
             "hpc_nodes": getattr(params, "hpc_nodes", None),
             "hpc_ncpus": getattr(params, "hpc_ncpus", None),
-            "hpc_mem": getattr(params, "hpc_mem", None)},
-            "hpc_ngpus": getattr(params, "hpc_ngpus", None),
+            "hpc_mem": getattr(params, "hpc_mem", None),
+            "hpc_ngpus": getattr(params, "hpc_ngpus", None)},
         "compute_used": {
             "device": str(device),
             "torch_num_threads": torch.get_num_threads(),
             "peak_mem_gb": round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 * 1024), 2)
         },
-        "prelim_time": round(time_analysis_dict["prelim_time"], 4),
+        "time_unit": ta_time_unit,
+        "prelim_time": round(time_analysis_dict["prelim_time"] * ta_scale, 4),
     }
     for ta_metric in ta_metric_names:
         ta_epoch_sums = [time_analysis_dict[ep][f"{ta_metric}_sum"]
                          for ep in range(1, epochs + 1)]
-        ta_summary[f"{ta_metric}_global_mean"] = round(float(np.mean(ta_epoch_sums)), 4)
-        ta_summary[f"{ta_metric}_global_std"] = round(float(np.std(ta_epoch_sums)), 4)
+        ta_summary[f"{ta_metric}_global_mean"] = round(float(np.mean(ta_epoch_sums)) * ta_scale, 4)
+        ta_summary[f"{ta_metric}_global_std"] = round(float(np.std(ta_epoch_sums)) * ta_scale, 4)
 
     # epoch_total is a single value per epoch (not per-batch), so average directly
     ta_epoch_totals = [time_analysis_dict[ep]["epoch_total"]
                        for ep in range(1, epochs + 1)]
-    ta_summary["epoch_total_global_mean"] = round(float(np.mean(ta_epoch_totals)), 4)
-    ta_summary["epoch_total_global_std"] = round(float(np.std(ta_epoch_totals)), 4)
+    ta_summary["epoch_total_global_mean"] = round(float(np.mean(ta_epoch_totals)) * ta_scale, 4)
+    ta_summary["epoch_total_global_std"] = round(float(np.std(ta_epoch_totals)) * ta_scale, 4)
 
     ta_json_path = ta_dir / "time_analysis_summary.json"
     with open(ta_json_path, "w") as f:

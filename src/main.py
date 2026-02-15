@@ -363,6 +363,7 @@ def main():
     parser.add_argument("--hpc_nodes", required=False, default=None, help="Number of HPC nodes")
     parser.add_argument("--hpc_ncpus", required=False, default=None, help="Number of CPUs per node")
     parser.add_argument("--hpc_mem", required=False, default=None, help="Memory requested (e.g. 8gb)")
+    parser.add_argument("--hpc_ngpus", required=False, default=None, help="Number of GPUs per node")
     args = parser.parse_args()
 
     # Set PyTorch thread count to match allocated CPUs (only on HPC)
@@ -423,6 +424,7 @@ def main():
             params.hpc_nodes = args.hpc_nodes
             params.hpc_ncpus = args.hpc_ncpus
             params.hpc_mem = args.hpc_mem
+            params.hpc_ngpus = args.hpc_ngpus
             params.device = device
 
             # Continue with training
@@ -462,6 +464,7 @@ def main():
         params.hpc_nodes = args.hpc_nodes
         params.hpc_ncpus = args.hpc_ncpus
         params.hpc_mem = args.hpc_mem
+        params.hpc_ngpus = args.hpc_ngpus
         params.device = device
 
         # Continue with training
