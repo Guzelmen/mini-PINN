@@ -765,7 +765,8 @@ def trainer(
         # Log m value if m loss is being used
         if getattr(params, "use_m_loss", False):
             log_dict["info/m_loss_m_value"] = getattr(params, "m_loss_m_value", 0.0)
-        wandb.log(log_dict)
+        if getattr(params, 'use_wandb', True):
+            wandb.log(log_dict)
 
         # Validation
         if val is not None:
@@ -892,15 +893,16 @@ def trainer(
             # Print validation summary
             print(f"  val loss = {avg_val_total:.6e}")
 
-            wandb.log({
-                "val/pde_loss": avg_val_residual,
-                **({"val/bc_1_loss": avg_val_bc1, "val/bc_2_loss": avg_val_bc2} if is_soft_mode else {}),
-                **({"val/fmt_loss": avg_val_fmt} if 'fmt' in val_losses else {}),
-                **({"val/data_loss": avg_val_data, "val/physics_loss": avg_val_physics} if getattr(params, 'hybrid_training', False) else {}),
-                **({"val/deriv_loss": avg_val_deriv} if getattr(params, 'use_deriv_loss', False) else {}),
-                "val/total_loss": avg_val_total,
-                "info/epoch_validation_time": time_taken_val
-            })
+            if getattr(params, 'use_wandb', True):
+                wandb.log({
+                    "val/pde_loss": avg_val_residual,
+                    **({"val/bc_1_loss": avg_val_bc1, "val/bc_2_loss": avg_val_bc2} if is_soft_mode else {}),
+                    **({"val/fmt_loss": avg_val_fmt} if 'fmt' in val_losses else {}),
+                    **({"val/data_loss": avg_val_data, "val/physics_loss": avg_val_physics} if getattr(params, 'hybrid_training', False) else {}),
+                    **({"val/deriv_loss": avg_val_deriv} if getattr(params, 'use_deriv_loss', False) else {}),
+                    "val/total_loss": avg_val_total,
+                    "info/epoch_validation_time": time_taken_val
+                })
 
         # Periodically save model weights
         save_weights_every = getattr(params, "save_weights_every", None)

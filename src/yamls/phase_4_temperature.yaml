@@ -11,6 +11,7 @@ base_config: &BASE_CONFIG
   run_name: "GPU_adaptcosinenormal_5000ep_physweightsched"
   wandb_notes: ""
   ## wandb parameters
+  use_wandb: True  # Set False to disable all wandb logging (useful for offline/debug runs)
   wandb_group: "week09feb"
   wandb_project: "mini_pinn"
   wandb_entity: "guzelmen_msci_project"

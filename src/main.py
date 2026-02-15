@@ -42,9 +42,13 @@ def run_training(params):
             except (AttributeError, TypeError):
                 pass
 
-    wandb.config.update(config_dict)
+    use_wandb = getattr(params, 'use_wandb', True)
 
-    print("Logged hyperparameters to wandb config.")
+    if use_wandb:
+        wandb.config.update(config_dict)
+        print("Logged hyperparameters to wandb config.")
+    else:
+        print("wandb disabled (use_wandb=False). Skipping wandb logging.")
 
     torch.manual_seed(params.random_seed)
     random.seed(params.random_seed)
@@ -171,7 +175,8 @@ def run_training(params):
                 if int(params.phase) == 4:
                     wandb_update["T_mean"] = params.T_mean
                     wandb_update["T_std"] = params.T_std
-                wandb.config.update(wandb_update, allow_val_change=True)
+                if use_wandb:
+                    wandb.config.update(wandb_update, allow_val_change=True)
             except Exception:
                 pass
     except Exception as e:
@@ -352,7 +357,8 @@ def run_training(params):
     else:
         raise ValueError(f"Invalid stage: {params.stage}")
 
-    wandb.finish()
+    if use_wandb:
+        wandb.finish()
 
 
 def main():
@@ -445,21 +451,23 @@ def main():
             print_params=True,
         )
 
-        tags = getattr(params, "wandb_tags", None)
-        if tags is not None and isinstance(tags, list):
-            wandb_tags = tags
-        else:
-            wandb_tags = None
-        wandb.login()
-        wandb.init(
-            name=params.run_name,
-            group=params.wandb_group,
-            project=params.wandb_project,
-            entity=params.wandb_entity,
-            tags=wandb_tags,
-            notes=getattr(params, 'wandb_notes', ''),
-        )
-        
+        use_wandb = getattr(params, 'use_wandb', True)
+        if use_wandb:
+            tags = getattr(params, "wandb_tags", None)
+            if tags is not None and isinstance(tags, list):
+                wandb_tags = tags
+            else:
+                wandb_tags = None
+            wandb.login()
+            wandb.init(
+                name=params.run_name,
+                group=params.wandb_group,
+                project=params.wandb_project,
+                entity=params.wandb_entity,
+                tags=wandb_tags,
+                notes=getattr(params, 'wandb_notes', ''),
+            )
+
         # Store HPC resource info from CLI args
         params.hpc_nodes = args.hpc_nodes
         params.hpc_ncpus = args.hpc_ncpus
