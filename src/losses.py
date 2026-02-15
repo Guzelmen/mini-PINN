@@ -759,6 +759,41 @@ def compute_data_loss_phase4(outputs, targets, params, val_stage=False):
     return loss
 
 
+def compute_deriv_loss_phase4(outputs, inputs, deriv_targets, params, val_stage=False):
+    """
+    Compute derivative loss: relative L2 between dψ_pred/dx and dψ_true/dx.
+
+    Args:
+        outputs: ψ(x) predictions from network, shape [batch, 1]
+        inputs: [batch, 3] with columns [x, alpha, T_kV] (must require_grad)
+        deriv_targets: dψ/dx from solver, shape [batch, 1]
+        params: config with debug_mode, etc.
+        val_stage: if True, always use rel_l2
+
+    Returns:
+        deriv_loss: mean relative L2 loss between dψ_pred/dx and dψ_true/dx
+    """
+    # Compute dψ_pred/dx via autograd
+    dpsi_pred = first_deriv_auto(outputs, inputs, var1=0)
+
+    if len(deriv_targets.shape) == 1:
+        dpsi_true = deriv_targets.unsqueeze(1)
+    else:
+        dpsi_true = deriv_targets
+
+    # Relative L2 normalization (always used, same for train and val)
+    scale = torch.abs(dpsi_true) + 1e-8
+    loss = torch.mean(((dpsi_pred - dpsi_true) / scale) ** 2)
+
+    if getattr(params, "debug_mode", False):
+        print(f"[Phase4 deriv loss {'VAL' if val_stage else 'TRAIN'}]")
+        print(f"[Phase4 deriv loss] dψ_pred/dx: min={dpsi_pred.min().item():.6g}, max={dpsi_pred.max().item():.6g}")
+        print(f"[Phase4 deriv loss] dψ_true/dx: min={dpsi_true.min().item():.6g}, max={dpsi_true.max().item():.6g}")
+        print(f"[Phase4 deriv loss] loss: {loss.item():.6g}")
+
+    return loss
+
+
 class LossWeighter_phase4:
     """
     Handles loss weighting for Phase 4 (temperature-dependent TF).
@@ -774,6 +809,17 @@ class LossWeighter_phase4:
         self.hybrid_strategy = getattr(params, 'hybrid_weight_strategy', 'fixed')
         self.physics_weight = getattr(params, 'physics_loss_weight', 1.0)
         self.data_weight = getattr(params, 'data_loss_weight', 1.0)
+        self.deriv_weight = getattr(params, 'deriv_loss_weight', 1.0)
+        self.use_deriv_loss = getattr(params, 'use_deriv_loss', False)
+        # Final weights and schedule type for cosine weight interpolation
+        self.physics_weight_final = getattr(params, 'physics_loss_weight_final', self.physics_weight)
+        self.data_weight_final = getattr(params, 'data_loss_weight_final', self.data_weight)
+        self.deriv_weight_final = getattr(params, 'deriv_loss_weight_final', self.deriv_weight)
+        self.hybrid_weight_schedule = getattr(params, 'hybrid_weight_schedule', 'fixed')
+        # Snapshots of initial weights (immutable reference points for cosine interpolation)
+        self.physics_weight_initial = self.physics_weight
+        self.data_weight_initial = self.data_weight
+        self.deriv_weight_initial = self.deriv_weight
 
         if self.mode == "hard":
             self.residual_weight = 1.0
@@ -812,6 +858,9 @@ class LossWeighter_phase4:
                 avg_mag = (data_mag + physics_mag) / 2.0
                 self.physics_weight = avg_mag / physics_mag
                 self.data_weight = avg_mag / data_mag
+                if 'deriv' in loss_dict:
+                    deriv_mag = max(loss_dict['deriv'].detach().item(), 1e-8)
+                    self.deriv_weight = avg_mag / deriv_mag
 
     def get_physics_loss(self, loss_dict):
         """Compute weighted sum of physics losses (residual + BCs)."""
@@ -826,14 +875,15 @@ class LossWeighter_phase4:
         return total
 
     def get_weighted_loss(self, loss_dict):
-        """Compute total weighted loss (physics + data if hybrid)."""
+        """Compute total weighted loss (physics + data + deriv if hybrid)."""
         physics_total = self.get_physics_loss(loss_dict)
-        
+
+        total = self.physics_weight * physics_total
         if self.hybrid_training and "data" in loss_dict:
-            total = self.physics_weight * physics_total + self.data_weight * loss_dict["data"]
-        else:
-            total = physics_total
-        
+            total = total + self.data_weight * loss_dict["data"]
+        if self.use_deriv_loss and "deriv" in loss_dict:
+            total = total + self.deriv_weight * loss_dict["deriv"]
+
         return total
 
 

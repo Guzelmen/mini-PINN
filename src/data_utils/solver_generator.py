@@ -48,6 +48,7 @@ def generate_solution(alpha, T_kV, n_points=100, tol=1e-5, y_guess=None, w_grid=
     Returns:
         x: numpy array of x values in (0, 1]
         psi: numpy array of psi(x) values
+        dpsi/dx: numpy array of dpsi(x)/dx values
         w_used: numpy array of w values used for the solution
         beta: numpy array of beta values
         dbeta: numpy array of dbeta values
@@ -73,8 +74,13 @@ def generate_solution(alpha, T_kV, n_points=100, tol=1e-5, y_guess=None, w_grid=
     x = w_used**2 / (2 * lam)
     # Convert to psi: ψ = β/γ
     psi = beta / gamma
+    # Calculate dψ/dx too from dβ/dw
+    # dψ/dx = (dβ/dw / γ) * (λ/w)
+    w_safe = np.maximum(w_used, 1e-10)
+    dpsi_dx = (dbeta/ gamma) * (lam / w_safe)
+    
 
-    return x, psi, w_used, beta, dbeta
+    return x, psi, dpsi_dx, w_used, beta, dbeta
 
 
 def generate_phase4_solver(
@@ -107,20 +113,21 @@ def generate_phase4_solver(
         max_nodes: maximum number of mesh nodes for solve_bvp (default: 2e5)
     Returns:
         inputs: torch tensor of shape [N, 3] with columns [x, alpha, T]
-        targets: torch tensor of shape [N, 1] with psi values
+        targets: torch tensor of shape [N, 2] with psi  and dpsi/dx values
     """
     if out_path is None:
         from ..utils import PROJECT_ROOT
-        out_path = PROJECT_ROOT / "data/phase_4_solver_inp&targets_smallrange.pt"
+        out_path = PROJECT_ROOT / "data/phase_4_solver_doubletargets_smallrange.pt"
     
     np.random.seed(seed)
 
     # Initialize wandb
     wandb.login()
     wandb.init(
-        name="phase_4_solver_v3_smallrange",
-        notes=f"Alpha ~1-5 (r0 from 5e-11 to 2.5e-10 m) - {n_alpha} vals, T 1-10 keV - {n_T} vals, x ~0-1 (natural solver grid) - {n_x} vals, tol={tol}. Using previous solutions for initial guess. Max nodes={max_nodes}.",
-        group="week26jan",
+        name="phase_4_solver_v4_smallrange_newaddedtarget",
+        notes=f"Alpha ~1-5 (r0 from 5e-11 to 2.5e-10 m) - {n_alpha} vals, T 1-10 keV - {n_T} vals, x ~0-1 (natural solver grid) - {n_x} vals, tol={tol}. \
+        Using previous solutions for initial guess. Max nodes={max_nodes}. Now targets are psi and dpsi/dx, used ffor auxiliary data loss function in training.",
+        group="week9feb",
         project="data_generation",
         entity="guzelmen_msci_project",
     )
@@ -168,9 +175,9 @@ def generate_phase4_solver(
 
         try:
             # Pass y_guess to solve_beta_bvp (need to add y_guess param to that function)
-            x, psi, w_used, beta_used, dbeta_used = generate_solution(alpha, T, n_points=n_x, tol=tol, y_guess=y_guess, w_grid=w_grid, max_nodes=max_nodes)
-            for xi, psii in zip(x, psi):
-                data.append([xi, alpha, T, psii])
+            x, psi, dpsi_dx, w_used, beta_used, dbeta_used = generate_solution(alpha, T, n_points=n_x, tol=tol, y_guess=y_guess, w_grid=w_grid, max_nodes=max_nodes)
+            for xi, psii, dpsii in zip(x, psi, dpsi_dx):
+                data.append([xi, alpha, T, psii, dpsii])
             completed += 1
             solved.append({'alpha': alpha, 'T': T, 'w': w_grid, 'beta': beta_used, 'dbeta': dbeta_used})
             wandb.log({"completed_pairs": completed, "attempted_pairs": i + 1, "failed_pairs": failed})
@@ -186,7 +193,7 @@ def generate_phase4_solver(
     
     data = np.array(data)
     inputs = torch.tensor(data[:, :3], dtype=torch.float32)  # [x, alpha, T]
-    targets = torch.tensor(data[:, 3:4], dtype=torch.float32)  # [psi]
+    targets = torch.tensor(data[:, 3:5], dtype=torch.float32)  # [psi, dpsi_dx]
     
     # Save
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
@@ -196,7 +203,8 @@ def generate_phase4_solver(
     print(f"  inputs shape: {tuple(inputs.shape)}")
     print(f"  targets shape: {tuple(targets.shape)}")
     print(f"  x range: [{inputs[:, 0].min():.6f}, {inputs[:, 0].max():.6f}]")
-    print(f"  psi range: [{targets.min():.6f}, {targets.max():.6f}]")
+    print(f"  psi range: [{targets[:, 0].min():.6f}, {targets[:, 0].max():.6f}]")
+    print(f"  dpsi/dx range: [{targets[:, 1].min():.6f}, {targets[:, 1].max():.6f}]")
     
     wandb.finish()
 

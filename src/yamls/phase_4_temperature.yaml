@@ -46,14 +46,15 @@ base_config: &BASE_CONFIG
   T_std: 1.0
 
   ## optimizer parameters
-  lr_type: "cosine" # constant, linear, cosine, cosine_restarts
+  lr_type: "cosine_decaying_restarts" # constant, linear, cosine, cosine_restarts, cosine_decaying_restarts
   constant_lr: 1e-4
   start_lr: 1e-5
-  end_lr: 5e-4
+  end_lr: 1e-3
   lr_warmup_epochs: 200
-  min_lr: 1e-5  # Minimum LR for cosine decay
+  min_lr: 5e-5  # Minimum LR at the bottom of every cosine cycle
+  cosine_restart_period: 800  # Epochs per cycle for cosine_restarts / cosine_decaying_restarts
+  restart_decay_factor: 0.6   # Geometric decay of peak LR per cycle (cosine_decaying_restarts only)
   # cosine_decay_epochs: 2000  # Fixed cosine decay period (omit to use total_epochs - warmup)
-  # cosine_restart_period: 500  # Epochs per cycle for lr_type="cosine_restarts"
   grad_clipping: True  # Clips to max_norm
   clip_value: 10.0
 
@@ -74,10 +75,20 @@ base_config: &BASE_CONFIG
   hybrid_training: True  # If True, combine PDE loss with data loss
   use_solver_data: True  # If True, load data in {inputs, targets} format
   data_loss_type: "rel_l2"  # options: "mse", "rel_l2"
-  physics_loss_weight: 1.0  # Weight for PDE residual loss
-  data_loss_weight: 10.0     # Weight for data MSE loss
-  data_loss_step_epochs: 500
-  hybrid_weight_strategy: "fixed"  # "fixed" or "adaptive"
+  hybrid_weight_strategy: "fixed"  # "fixed" or "adaptive" (adaptive overrides schedule below)
+  hybrid_weight_schedule: "cosine"  # "fixed", "step", or "cosine"
+  # Starting weights (epoch 0)
+  physics_loss_weight: 1.0
+  data_loss_weight: 5.0
+  deriv_loss_weight: 5.0
+  # Final weights (last epoch) — cosine interpolation between start and end
+  physics_loss_weight_final: 5.0
+  data_loss_weight_final: 1.0
+  deriv_loss_weight_final: 1.0
+  data_loss_step_epochs: 500  # Only used when hybrid_weight_schedule: "step"
+
+  ## derivative target loss
+  use_deriv_loss: True        # If True, add dψ/dx matching loss from solver data
 
   ## data parameters
   data_path: "data/phase_4_solver_inp&targets_smallrange.pt"

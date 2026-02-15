@@ -142,6 +142,49 @@ def get_warmup_cosine_restarts_scheduler(optimizer, warmup_epochs, start_lr,
     return LambdaLR(optimizer, lr_lambda)
 
 
+def get_warmup_cosine_decaying_restarts_scheduler(optimizer, warmup_epochs, start_lr,
+                                                  end_lr, min_lr, restart_period,
+                                                  restart_decay_factor=0.6):
+    """
+    Linear warmup followed by cosine annealing with warm restarts where each
+    cycle's peak LR decays geometrically.
+
+    After warmup, cycle k (0-indexed) peaks at:
+        peak_k = end_lr * restart_decay_factor^k
+
+    Each cycle decays from peak_k down to min_lr over restart_period epochs.
+
+    Args:
+        optimizer: PyTorch optimizer
+        warmup_epochs: Number of epochs for linear warmup
+        start_lr: Starting LR for warmup
+        end_lr: Peak LR for the first cycle (base optimizer LR)
+        min_lr: Minimum LR at the bottom of every cycle
+        restart_period: Number of epochs per cosine cycle
+        restart_decay_factor: Multiplicative decay applied to each cycle's peak
+            (e.g. 0.6 → peaks at end_lr, 0.6*end_lr, 0.36*end_lr, ...)
+    """
+    _period = max(1, restart_period)
+    _decay = restart_decay_factor
+
+    def lr_lambda(epoch):
+        if warmup_epochs > 0 and epoch < warmup_epochs:
+            warmup_ratio = epoch / float(warmup_epochs)
+            return (start_lr / end_lr) * (1 - warmup_ratio) + 1.0 * warmup_ratio
+        else:
+            cosine_epoch = epoch - warmup_epochs
+            cycle = cosine_epoch // _period
+            pos_in_cycle = cosine_epoch % _period
+            # Peak for this cycle as a multiplier relative to end_lr
+            peak_multiplier = (_decay ** cycle)
+            # Bottom of cycle as a multiplier relative to end_lr
+            bottom_multiplier = min_lr / end_lr
+            progress = pos_in_cycle / float(_period)
+            return bottom_multiplier + (peak_multiplier - bottom_multiplier) * (1 + math.cos(math.pi * progress)) / 2
+
+    return LambdaLR(optimizer, lr_lambda)
+
+
 def trainer(
     model,
     train,
@@ -171,6 +214,7 @@ def trainer(
     min_lr = params.min_lr
     cosine_decay_epochs = params.get('cosine_decay_epochs', None)
     restart_period = params.get('cosine_restart_period', None)
+    restart_decay_factor = getattr(params, 'restart_decay_factor', 0.6)
 
     # Initialize optimizer and scheduler based on lr_type
     if lr_type == "constant":
@@ -216,13 +260,28 @@ def trainer(
             f"then cosine restarts ({end_lr:.2e} -> {min_lr:.2e}) every {restart_period} epochs "
             f"(~{n_restarts} restarts over {epochs} epochs)")
 
+    elif lr_type == "cosine_decaying_restarts":
+        # Linear warmup + cosine restarts with geometrically decaying peaks
+        if restart_period is None:
+            raise ValueError("lr_type='cosine_decaying_restarts' requires cosine_restart_period to be set")
+        optimizer = Adam(model.parameters(), lr=end_lr)
+        scheduler = get_warmup_cosine_decaying_restarts_scheduler(
+            optimizer, warmup_epochs, start_lr, end_lr, min_lr, restart_period,
+            restart_decay_factor=restart_decay_factor)
+        n_restarts = max(0, (epochs - warmup_epochs) // restart_period - 1)
+        print(
+            f"LR schedule: {warmup_epochs} epochs warmup ({start_lr:.2e} -> {end_lr:.2e}), "
+            f"then cosine decaying restarts every {restart_period} epochs "
+            f"(peaks: {end_lr:.2e}, {end_lr*restart_decay_factor:.2e}, {end_lr*restart_decay_factor**2:.2e}, ... "
+            f"-> {min_lr:.2e}, decay_factor={restart_decay_factor}, ~{n_restarts} restarts)")
+
     else:
         raise ValueError(
-            f"Unknown lr_type: {lr_type}. Choose from: constant, linear, cos/cosine, cosine_restarts")
+            f"Unknown lr_type: {lr_type}. Choose from: constant, linear, cos/cosine, cosine_restarts, cosine_decaying_restarts")
 
     predictions = {}
     # Ensure first epoch uses start_lr for warmup schedules without stepping scheduler before optimizer
-    if lr_type in ["linear", "cos", "cosine", "cosine_restarts"] and warmup_epochs > 0:
+    if lr_type in ["linear", "cos", "cosine", "cosine_restarts", "cosine_decaying_restarts"] and warmup_epochs > 0:
         optimizer.param_groups[0]["lr"] = start_lr
     
     # Initialize m decay strategy if update_m is enabled
@@ -290,6 +349,8 @@ def trainer(
         if getattr(params, 'hybrid_training', False):
             epoch_losses['data'] = []
             epoch_losses['physics'] = []
+        if getattr(params, 'use_deriv_loss', False):
+            epoch_losses['deriv'] = []
 
         # Collect raw losses for adaptive weighting (update once per epoch)
         raw_losses_for_weighting = {'residual': [], 'bc_1': [], 'bc_2': []}
@@ -297,6 +358,8 @@ def trainer(
             raw_losses_for_weighting['fmt'] = []
         if getattr(params, 'hybrid_training', False):
             raw_losses_for_weighting['data'] = []
+        if getattr(params, 'use_deriv_loss', False):
+            raw_losses_for_weighting['deriv'] = []
         # Collect gradient norms per batch for diagnostics
         epoch_grad_norms = []
         clipped_grad_norms = []
@@ -404,11 +467,29 @@ def trainer(
                 loss_dict['fmt'] = fmt_loss
 
             # Compute data loss for hybrid training
+            use_deriv_loss = getattr(params, 'use_deriv_loss', False)
+            _warn_deriv_shape = getattr(params, '_warned_deriv_shape', False)
             if hybrid_training and targets is not None:
-                data_loss = losses.compute_data_loss_phase4(outputs, targets, params, val_stage=False)
+                # Slice ψ column — supports both [N,1] (legacy) and [N,2] (with deriv)
+                psi_targets = targets[:, 0:1]
+                data_loss = losses.compute_data_loss_phase4(outputs, psi_targets, params, val_stage=False)
                 loss_dict['data'] = data_loss
             else:
                 data_loss = torch.tensor(0.0, device=outputs.device)
+
+            # Derivative target loss
+            if use_deriv_loss and targets is not None:
+                if targets.shape[1] >= 2:
+                    deriv_targets_batch = targets[:, 1:2]
+                    deriv_loss = losses.compute_deriv_loss_phase4(outputs, inputs, deriv_targets_batch, params, val_stage=False)
+                    loss_dict['deriv'] = deriv_loss
+                else:
+                    if not _warn_deriv_shape:
+                        print("[Warning] use_deriv_loss=True but targets.shape[1]==1. Skipping deriv loss.")
+                        params._warned_deriv_shape = True
+                    deriv_loss = torch.tensor(0.0, device=outputs.device)
+            else:
+                deriv_loss = torch.tensor(0.0, device=outputs.device)
 
             # For adaptive weighting: collect raw losses, don't update weights yet
             if weighter.strategy == 'adaptive' or weighter.hybrid_strategy == 'adaptive':
@@ -420,6 +501,8 @@ def trainer(
                     raw_losses_for_weighting['fmt'].append(fmt_loss.detach())
                 if hybrid_training and targets is not None:
                     raw_losses_for_weighting['data'].append(data_loss.detach())
+                if use_deriv_loss and 'deriv' in loss_dict:
+                    raw_losses_for_weighting['deriv'].append(deriv_loss.detach())
 
             
             if params.phase == 3:
@@ -499,6 +582,8 @@ def trainer(
                 # Physics loss is residual + BCs (weighted)
                 physics_loss = weighter.get_physics_loss(loss_dict) if hasattr(weighter, 'get_physics_loss') else residual_loss
                 epoch_losses['physics'].append(physics_loss.item() if torch.is_tensor(physics_loss) else physics_loss)
+            if use_deriv_loss:
+                epoch_losses['deriv'].append(deriv_loss.item())
             epoch_losses['total'].append(total_loss.item())
 
             # Update progress bar
@@ -546,6 +631,7 @@ def trainer(
         avg_total = np.mean(epoch_losses['total'])
         avg_fmt = np.mean(epoch_losses['fmt']) if 'fmt' in epoch_losses else 0.0
         avg_data = np.mean(epoch_losses['data']) if 'data' in epoch_losses and len(epoch_losses['data']) > 0 else 0.0
+        avg_deriv = np.mean(epoch_losses['deriv']) if 'deriv' in epoch_losses and len(epoch_losses['deriv']) > 0 else 0.0
         print("We have data loss:", 'data' in epoch_losses)
         print("Min and max data loss:", np.min(epoch_losses['data']) if 'data' in epoch_losses and len(epoch_losses['data']) > 0 else 'N/A', np.max(epoch_losses['data']) if 'data' in epoch_losses and len(epoch_losses['data']) > 0 else 'N/A')
         avg_physics = np.mean(epoch_losses['physics']) if 'physics' in epoch_losses and len(epoch_losses['physics']) > 0 else 0.0
@@ -583,6 +669,8 @@ def trainer(
                 raw_losses_for_weighting['fmt'] = []
             if getattr(params, 'hybrid_training', False):
                 raw_losses_for_weighting['data'] = []
+            if getattr(params, 'use_deriv_loss', False):
+                raw_losses_for_weighting['deriv'] = []
 
         # Step-decay data weight at interval boundaries
         if data_weight_decrement is not None and ep % data_loss_step_epochs == 0:
@@ -590,6 +678,21 @@ def trainer(
                                   weighter.data_weight - data_weight_decrement)
             print(f"Epoch {ep}: data_weight {weighter.data_weight:.4f} -> {new_data_weight:.4f}")
             weighter.data_weight = new_data_weight
+
+        # Cosine interpolation of loss weights (physics/data/deriv) over full training run
+        if weighter.hybrid_training and weighter.hybrid_weight_schedule == 'cosine':
+            t = ep / max(epochs - 1, 1)
+            cosine_factor = 0.5 * (1.0 - math.cos(math.pi * t))
+            weighter.physics_weight = (weighter.physics_weight_initial
+                                       + (weighter.physics_weight_final - weighter.physics_weight_initial)
+                                       * cosine_factor)
+            weighter.data_weight = (weighter.data_weight_initial
+                                    + (weighter.data_weight_final - weighter.data_weight_initial)
+                                    * cosine_factor)
+            if weighter.use_deriv_loss:
+                weighter.deriv_weight = (weighter.deriv_weight_initial
+                                         + (weighter.deriv_weight_final - weighter.deriv_weight_initial)
+                                         * cosine_factor)
 
         # Update scheduler AFTER all batches (PyTorch best practice)
         scheduler.step()
@@ -650,10 +753,12 @@ def trainer(
             **({"train/bc_1_loss": avg_bc1, "train/bc_2_loss": avg_bc2} if is_soft_mode else {}),
             **({"train/fmt_loss": avg_fmt} if 'fmt' in epoch_losses else {}),
             **({"train/data_loss": avg_data, "train/physics_loss": avg_physics} if getattr(params, 'hybrid_training', False) else {}),
+            **({"train/deriv_loss": avg_deriv} if getattr(params, 'use_deriv_loss', False) else {}),
             "train/total_loss": avg_total,
             **({"weights/residual_weight": weighter.residual_weight, "weights/bc_1_weight": weighter.bc_1_weight, "weights/bc_2_weight": weighter.bc_2_weight} if is_soft_mode else {}),
             **({"weights/fmt_weight": weighter.fmt_weight} if getattr(params, "fmt_help", False) else {}),
             **({"weights/physics_weight": weighter.physics_weight, "weights/data_weight": weighter.data_weight} if getattr(params, 'hybrid_training', False) else {}),
+            **({"weights/deriv_weight": weighter.deriv_weight} if getattr(params, 'use_deriv_loss', False) else {}),
             **checks,
             **grad_stats,
         }
@@ -672,6 +777,8 @@ def trainer(
             if getattr(params, 'hybrid_training', False):
                 val_losses['data'] = []
                 val_losses['physics'] = []
+            if getattr(params, 'use_deriv_loss', False):
+                val_losses['deriv'] = []
 
             for batch in val:
                 # Extract inputs (and targets if present in data)
@@ -732,11 +839,21 @@ def trainer(
                     val_losses['fmt'].append(fmt_loss.item())
 
                 # Compute data loss for hybrid validation
+                use_deriv_loss = getattr(params, 'use_deriv_loss', False)
                 if hybrid_training and targets is not None:
-                    val_data_loss = losses.compute_data_loss_phase4(outputs, targets, params, val_stage=True)
+                    # Slice ψ column — supports both [N,1] (legacy) and [N,2] (with deriv)
+                    psi_targets = targets[:, 0:1]
+                    val_data_loss = losses.compute_data_loss_phase4(outputs, psi_targets, params, val_stage=True)
                     val_losses['data'].append(val_data_loss.item())
                 else:
                     val_data_loss = torch.tensor(0.0, device=outputs.device)
+
+                # Derivative target loss for validation
+                if use_deriv_loss and targets is not None and targets.shape[1] >= 2:
+                    val_deriv_loss = losses.compute_deriv_loss_phase4(outputs, inputs, targets[:, 1:2], params, val_stage=True)
+                    val_losses['deriv'].append(val_deriv_loss.item())
+                else:
+                    val_deriv_loss = torch.tensor(0.0, device=outputs.device)
 
                 # Compute val total loss: unweighted sum (no hybrid weighting on val)
                 val_loss_dict = {
@@ -752,9 +869,11 @@ def trainer(
                 if hybrid_training and targets is not None:
                     val_losses['physics'].append(val_physics_loss.item() if torch.is_tensor(val_physics_loss) else val_physics_loss)
 
-                # Total = physics + data, unweighted (no physics_weight/data_weight)
+                # Total = physics + data (+ deriv if enabled), unweighted
                 if hybrid_training and targets is not None:
                     val_total_loss = val_physics_loss + val_data_loss
+                    if use_deriv_loss and targets.shape[1] >= 2:
+                        val_total_loss = val_total_loss + val_deriv_loss
                 else:
                     val_total_loss = val_physics_loss
                 val_losses['total'].append(val_total_loss.item() if torch.is_tensor(val_total_loss) else val_total_loss)
@@ -765,6 +884,7 @@ def trainer(
             avg_val_total = np.mean(val_losses['total'])
             avg_val_fmt = np.mean(val_losses['fmt']) if 'fmt' in val_losses else 0.0
             avg_val_data = np.mean(val_losses['data']) if 'data' in val_losses and len(val_losses['data']) > 0 else 0.0
+            avg_val_deriv = np.mean(val_losses['deriv']) if 'deriv' in val_losses and len(val_losses['deriv']) > 0 else 0.0
             avg_val_physics = np.mean(val_losses['physics']) if 'physics' in val_losses and len(val_losses['physics']) > 0 else 0.0
             time_end_val = time.time()
             time_taken_val = time_end_val - time_start_val
@@ -777,6 +897,7 @@ def trainer(
                 **({"val/bc_1_loss": avg_val_bc1, "val/bc_2_loss": avg_val_bc2} if is_soft_mode else {}),
                 **({"val/fmt_loss": avg_val_fmt} if 'fmt' in val_losses else {}),
                 **({"val/data_loss": avg_val_data, "val/physics_loss": avg_val_physics} if getattr(params, 'hybrid_training', False) else {}),
+                **({"val/deriv_loss": avg_val_deriv} if getattr(params, 'use_deriv_loss', False) else {}),
                 "val/total_loss": avg_val_total,
                 "info/epoch_validation_time": time_taken_val
             })
