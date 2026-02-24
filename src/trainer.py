@@ -320,6 +320,12 @@ def trainer(
     time_analysis_dict = {}
     time_analysis_dict["prelim_time"] = prelim_time
 
+    # Log model parameter count once before training starts
+    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Model trainable parameters: {n_params:,}")
+    if getattr(params, 'use_wandb', True):
+        wandb.log({"info/n_params": n_params})
+
     for ep in range(1, epochs+1):
         time_start = time.time()
         
@@ -398,7 +404,10 @@ def trainer(
                     print("No targets in batch")
             
             # Clamp x to avoid singularity at x=0
-            inputs[:, 0].clamp_(min=1e-6, max=1.0)
+            if getattr(params, 'filter_x_min', False):
+                inputs[:, 0].clamp_(max=1.0)  # Only clamp upper bound; lower bound already filtered in loader
+            else:
+                inputs[:, 0].clamp_(min=1e-6, max=1.0)  # Legacy: clamp both bounds
 
             # Ensure inputs require gradients for autograd wrt x
             inputs.requires_grad_(True)
@@ -794,7 +803,10 @@ def trainer(
                     targets = None
                 
                 # Clamp x to avoid singularity at x=0 and ensure x <= 1 for phi_0_transform (same as training)
-                inputs[:, 0].clamp_(min=1e-6, max=1.0)
+                if getattr(params, 'filter_x_min', False):
+                    inputs[:, 0].clamp_(max=1.0)  # Only clamp upper bound; lower bound already filtered in loader
+                else:
+                    inputs[:, 0].clamp_(min=1e-6, max=1.0)  # Legacy: clamp both bounds
                 
                 # Ensure inputs require gradients for derivative-based losses
                 inputs.requires_grad_(True)
@@ -940,15 +952,18 @@ def trainer(
     ta_time_unit = getattr(params, "time_unit", "seconds")
     ta_time_scales = {"seconds": 1.0, "ms": 1000.0, "minutes": 1.0 / 60.0}
     ta_scale = ta_time_scales.get(ta_time_unit, 1.0)
+    gpu_type_used = getattr(params, "gpu_type", "L40S")
 
     ta_metric_names = ["prefwd", "fwd", "loss", "backprop", "optim_step"]
     ta_summary = {
+        "n_params": n_params,
         "compute_specs": {
             "hpc_nodes": getattr(params, "hpc_nodes", None),
             "hpc_ncpus": getattr(params, "hpc_ncpus", None),
             "hpc_mem": getattr(params, "hpc_mem", None),
             "hpc_ngpus": getattr(params, "hpc_ngpus", None)},
         "compute_used": {
+            "gpu_type": gpu_type_used, 
             "device": str(device),
             "torch_num_threads": torch.get_num_threads(),
             "peak_mem_gb": round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 * 1024), 2)

@@ -163,11 +163,19 @@ def load_data(params):
     use_solver_data = getattr(params, 'use_solver_data', False)
     
     if use_solver_data or (isinstance(raw_data, dict) and 'inputs' in raw_data and 'targets' in raw_data):
-        # Solver format: {'inputs': [N, 3], 'targets': [N, 1]}
+        # Solver format: {'inputs': [N, 3], 'targets': [N, 1 or 2]}
         X = raw_data['inputs']
         Y = raw_data['targets']
         print(f"Loaded solver data: inputs shape {X.shape}, targets shape {Y.shape}")
         has_targets = True
+        # Filter out points with x below threshold (these get clamped to wrong values in training)
+        if getattr(params, 'filter_x_min', False):
+            x_min_thresh = getattr(params, 'x_min_threshold', 1e-6)
+            valid_mask = X[:, 0] >= x_min_thresh
+            n_before = X.shape[0]
+            X = X[valid_mask]
+            Y = Y[valid_mask]
+            print(f"Filtered x < {x_min_thresh}: {n_before} -> {X.shape[0]} ({n_before - X.shape[0]} removed)")
     else:
         # Legacy format: raw tensor
         X = raw_data  # Shape: [N, 2] or [N, 3]

@@ -8,11 +8,11 @@ base_config: &BASE_CONFIG
     ## parameters
   random_seed: 42
 
-  run_name: "GPU_adaptcosinenormal_5000ep_physweightsched"
+  run_name: "xmin_1e-6_endphysw10_8x128_GPU_deriv_loss_cosine_restarts_cosine_weights_5000ep_gradclip250"
   wandb_notes: ""
-  ## wandb parameters
-  use_wandb: True  # Set False to disable all wandb logging (useful for offline/debug runs)
-  wandb_group: "week09feb"
+## wandb parameters
+  use_wandb: True  # Set False to disable all wandb logging
+  wandb_group: "week23feb"
   wandb_project: "mini_pinn"
   wandb_entity: "guzelmen_msci_project"
 
@@ -23,14 +23,14 @@ base_config: &BASE_CONFIG
   ## model parameters
   mode: "hard" # "soft" or "hard"
   inp_dim: 3  
-  nlayers: 6
-  hidden: 64
+  nlayers: 8
+  hidden: 128
   activation: "SiLU" # SiLU, Tanh, ReLU, Identity, SIREN, GELU, Mish
   w0: 30
   add_phi0: False
   k_val: 10
   
-  # m-weighted loss: multiplies residual by x^(0.5+m) on LHS, x^(1.5+m) on RHS
+  # phase 4 m-weighted loss: multiplies residual by x^(0.5+m) on LHS, x^(1.5+m) on RHS
   # m=-0.5 is equivalent to no m-weighting (baseline)
   use_m_loss: True
   m_loss_m_value: -0.5  # sweep values: -0.5, 0, 0.5, 1.0
@@ -56,8 +56,8 @@ base_config: &BASE_CONFIG
   cosine_restart_period: 800  # Epochs per cycle for cosine_restarts / cosine_decaying_restarts
   restart_decay_factor: 0.6   # Geometric decay of peak LR per cycle (cosine_decaying_restarts only)
   # cosine_decay_epochs: 2000  # Fixed cosine decay period (omit to use total_epochs - warmup)
-  grad_clipping: True  # Clips to max_norm
-  clip_value: 10.0
+  grad_clipping: True  # Clips to clip_value
+  clip_value: 250.0
 
   ## loss parameters
   loss_type: "mse"
@@ -83,7 +83,7 @@ base_config: &BASE_CONFIG
   data_loss_weight: 5.0
   deriv_loss_weight: 5.0
   # Final weights (last epoch) — cosine interpolation between start and end
-  physics_loss_weight_final: 5.0
+  physics_loss_weight_final: 10.0
   data_loss_weight_final: 1.0
   deriv_loss_weight_final: 1.0
   data_loss_step_epochs: 500  # Only used when hybrid_weight_schedule: "step"
@@ -92,7 +92,9 @@ base_config: &BASE_CONFIG
   use_deriv_loss: True        # If True, add dψ/dx matching loss from solver data
 
   ## data parameters
-  data_path: "data/phase_4_solver_inp&targets_smallrange.pt"
+  data_path: "data/phase_4_solver_doubletargets_smallrange.pt"
+  filter_x_min: True          # If True, remove data points with x < x_min_threshold before splitting
+  x_min_threshold: 1e-6       # Minimum x value to keep (points below are removed)
   batch_size: 2048
   shuffle_train: True
 
@@ -105,6 +107,6 @@ base_config: &BASE_CONFIG
   save_every: 100
   plot_auto: False
   save_weights: True
-  save_weights_every: 100
+  save_weights_every: 250
   pred_dir: "predictions"
   plot_dir: "plot_predictions"
