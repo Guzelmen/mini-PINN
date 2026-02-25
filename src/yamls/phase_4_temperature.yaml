@@ -46,6 +46,11 @@ base_config: &BASE_CONFIG
   T_mean: 0.0
   T_std: 1.0
 
+  ## normalisation (x)
+  use_log_x: True
+  x_log_mean: 0.0   # Will be computed from train data
+  x_log_std: 1.0    # Will be computed from train data
+
   ## optimizer parameters
   lr_type: "cosine_decaying_restarts" # constant, linear, cosine, cosine_restarts, cosine_decaying_restarts
   constant_lr: 1e-4

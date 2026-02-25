@@ -89,6 +89,16 @@ def run_training(params):
                     f"[norm] Train standardize log1p(T): mean={T_mean:.6g}, std={T_std:.6g}"
                 )
 
+                # Phase 4: Optionally compute log x normalization stats
+                if getattr(params, 'use_log_x', False):
+                    train_log_x = torch.log(X_train[:, 0:1] + 1e-8)
+                    x_log_mean = float(train_log_x.mean().item())
+                    x_log_std = float(train_log_x.std(unbiased=False).item())
+                    params.x_log_mean = x_log_mean
+                    params.x_log_std = x_log_std
+                    print(f"[norm] Train standardize log(x): mean={x_log_mean:.6g}, std={x_log_std:.6g}")
+
+
             # Log diagnostics for val/test (raw and standardized with train stats)
             diag = {
                 "norm/train_log1p_alpha_mean": float(train_log_alpha.mean().item()),
@@ -130,6 +140,17 @@ def run_training(params):
                         f"{diag['norm/val_log1p_T_stdzd_std']:.6g})"
                     )
 
+                    # Phase 4: Val log x diagnostics
+                    if getattr(params, 'use_log_x', False):
+                        test_log_x = torch.log(X_test[:, 0:1] + 1e-8)
+                        test_x_stdzd = (test_log_x - x_log_mean) / (x_log_std + 1e-12)
+                        diag.update({
+                            "norm/test_log_x_mean": float(test_log_x.mean().item()),
+                            "norm/test_log_x_std": float(test_log_x.std(unbiased=False).item()),
+                            "norm/test_log_x_stdzd_mean": float(test_x_stdzd.mean().item()),
+                            "norm/test_log_x_stdzd_std": float(test_x_stdzd.std(unbiased=False).item()),
+                        })
+
             if X_test is not None:
                 test_log_alpha = torch.log1p(X_test[:, 1:2])
                 test_stdzd = (test_log_alpha - a_mean) / (a_std + 1e-12)
@@ -163,6 +184,17 @@ def run_training(params):
                         f"{diag['norm/test_log1p_T_stdzd_std']:.6g})"
                     )
 
+                    # Phase 4: Test log x diagnostics
+                    if getattr(params, 'use_log_x', False):
+                        test_log_x = torch.log(X_test[:, 0:1] + 1e-8)
+                        test_x_stdzd = (test_log_x - x_log_mean) / (x_log_std + 1e-12)
+                        diag.update({
+                            "norm/test_log_x_mean": float(test_log_x.mean().item()),
+                            "norm/test_log_x_std": float(test_log_x.std(unbiased=False).item()),
+                            "norm/test_log_x_stdzd_mean": float(test_x_stdzd.mean().item()),
+                            "norm/test_log_x_stdzd_std": float(test_x_stdzd.std(unbiased=False).item()),
+                        })
+
             # Ensure these derived params/diagnostics get into wandb (initial config update happened earlier)
             try:
                 wandb_update = {
@@ -175,6 +207,9 @@ def run_training(params):
                 if int(params.phase) == 4:
                     wandb_update["T_mean"] = params.T_mean
                     wandb_update["T_std"] = params.T_std
+                    if getattr(params, 'use_log_x', False):
+                        wandb_update["x_log_mean"] = params.x_log_mean
+                        wandb_update["x_log_std"] = params.x_log_std
                 if use_wandb:
                     wandb.config.update(wandb_update, allow_val_change=True)
             except Exception:

@@ -535,6 +535,18 @@ class Model_hard_phase4(nn.Module):
             self.register_buffer("T_min", torch.tensor(getattr(params, "T_minmax_min", -1.0)))
             self.register_buffer("T_max", torch.tensor(getattr(params, "T_minmax_max", 1.0)))
 
+        
+        self.use_log_x = getattr(params, "use_log_x", False):
+        if self.use_log_x:
+            if norm_mode == "standardize":
+                x_mean_val = getattr(params, "x_log_mean", 0.0)
+                x_std_val = getattr(params, "x_log_std", 1.0)
+                self.register_buffer("x_log_mean", torch.tensor(float(x_mean_val)))
+                self.register_buffer("x_log_std", torch.tensor(float(x_std_val)))
+            elif norm_mode = "minmax":
+                self.register_buffer("x_min", torch.tensor(getattr(params, "x_minmax_min", -1.0)))
+                self.register_buffer("x_max", torch.tensor(getattr(params, "x_minmax_max", 1.0)))
+
         self.norm_mode = norm_mode
         self.debug_mode = getattr(params, "debug_mode", False)
         self.params = params
@@ -569,12 +581,25 @@ class Model_hard_phase4(nn.Module):
 
         return normalised
 
+    def scale_x(self, x):
+        log_x = torch.log(x + 1e-8)
+        if self.norm_mode == "standardize":
+            normalised = (log_x - self.x_log_mean) / (self.x_log_std + 1e-8)
+        elif self.norm_mode == "minmax":
+            x_mm = (log_x - self.x_min) / (self.x_max - self.x_min + 1e-12)
+            normalised = 2.0 * x_mm - 1.0
+        else:
+            normalised = log_x
+            print("Warning: incorrect norm_mode")
+        
+        return normalised
+
     def forward(self, inputs):
         """
         Args:
             inputs: shape [N, 3] with columns [x, alpha, T_kV]
 
-        Computes sqrt(x), normalizes alpha and T, then passes 4 inputs to network.
+        Computes sqrt(x), normalizes alpha and T and optionally x, then passes 3 or 4 inputs to network.
 
         Returns:
             Psi: shape [N, 1]
@@ -585,10 +610,15 @@ class Model_hard_phase4(nn.Module):
 
         norm_alpha = self.scale_alpha(alpha)
         norm_T = self.scale_T(T_kV)
+        if self.use_log_x:
+            norm_x = self.scale_x(x)
+        else:
+            norm_x = x
 
         if self.debug_mode:
             # Debug: check raw vs normalized statistics
             print(f"[Phase4 fwd] x: min={x.min().item():.6g}, max={x.max().item():.6g}")
+            print(f"[Phase4 fwd] norm_x: min={norm_x.min().item():.6g}, max={norm_x.max().item():.6g}")
             print(f"[Phase4 fwd] alpha: mean={alpha.mean().item():.6g}, std={alpha.std().item():.6g}")
             print(f"[Phase4 fwd] norm_alpha: mean={norm_alpha.mean().item():.6g}, std={norm_alpha.std().item():.6g}")
             print(f"[Phase4 fwd] T_kV: mean={T_kV.mean().item():.6g}, std={T_kV.std().item():.6g}")
@@ -598,10 +628,10 @@ class Model_hard_phase4(nn.Module):
         # inp_dim=3: [x, norm_alpha, norm_T]
         # inp_dim=4: [x, norm_alpha, norm_T, sqrt_x]
         if self.inp_dim == 4:
-            sqrt_x = torch.sqrt(x)
-            network_inp = torch.cat([x, norm_alpha, norm_T, sqrt_x], dim=-1)
+            sqrt_x = torch.sqrt(norm_x)
+            network_inp = torch.cat([norm_x, norm_alpha, norm_T, sqrt_x], dim=-1)
         else:
-            network_inp = torch.cat([x, norm_alpha, norm_T], dim=-1)
+            network_inp = torch.cat([norm_x, norm_alpha, norm_T], dim=-1)
 
         h = self.act(self.first(network_inp))
         for layer in self.hiddens:
