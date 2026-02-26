@@ -474,8 +474,14 @@ class Model_hard_phase4(nn.Module):
         activation = params.activation
         self.k_val = params.k_val
         self.add_phi0 = params.add_phi0
+        self.use_log_x = getattr(params, "use_log_x", False)
+        self.use_sqrtx = getattr(params, "use_sqrtx", False)
 
-        in_dim = params.inp_dim  # 3: [x, norm_alpha, norm_T] or 4: [x, norm_alpha, norm_T, sqrt_x]
+        in_dim = params.inp_dim
+        if self.use_log_x:
+            in_dim = in_dim + 1
+        if self.use_sqrtx:
+            in_dim = in_dim + 1
         self.inp_dim = in_dim  # Store for forward()
         self.first = nn.Linear(in_dim, hidden)
         self.hiddens = nn.ModuleList(
@@ -536,14 +542,14 @@ class Model_hard_phase4(nn.Module):
             self.register_buffer("T_max", torch.tensor(getattr(params, "T_minmax_max", 1.0)))
 
         
-        self.use_log_x = getattr(params, "use_log_x", False):
+        
         if self.use_log_x:
             if norm_mode == "standardize":
                 x_mean_val = getattr(params, "x_log_mean", 0.0)
                 x_std_val = getattr(params, "x_log_std", 1.0)
                 self.register_buffer("x_log_mean", torch.tensor(float(x_mean_val)))
                 self.register_buffer("x_log_std", torch.tensor(float(x_std_val)))
-            elif norm_mode = "minmax":
+            elif norm_mode == "minmax":
                 self.register_buffer("x_min", torch.tensor(getattr(params, "x_minmax_min", -1.0)))
                 self.register_buffer("x_max", torch.tensor(getattr(params, "x_minmax_max", 1.0)))
 
@@ -611,27 +617,24 @@ class Model_hard_phase4(nn.Module):
         norm_alpha = self.scale_alpha(alpha)
         norm_T = self.scale_T(T_kV)
         if self.use_log_x:
-            norm_x = self.scale_x(x)
+            log_x_feat = self.scale_x(x)
+            network_inp = torch.cat([x, norm_alpha, norm_T, log_x_feat], dim=-1)
+        elif self.use_sqrtx:
+            sqrt_x = torch.sqrt(x)
+            network_inp = torch.cat([x, norm_alpha, norm_T, sqrt_x], dim=-1)
         else:
-            norm_x = x
+            network_inp = torch.cat([x, norm_alpha, norm_T], dim=-1)
 
         if self.debug_mode:
             # Debug: check raw vs normalized statistics
             print(f"[Phase4 fwd] x: min={x.min().item():.6g}, max={x.max().item():.6g}")
-            print(f"[Phase4 fwd] norm_x: min={norm_x.min().item():.6g}, max={norm_x.max().item():.6g}")
+            print(f"[Phase4 fwd] log_x_feat: min={log_x_feat.min().item():.6g}, max={log_x_feat.max().item():.6g}")
             print(f"[Phase4 fwd] alpha: mean={alpha.mean().item():.6g}, std={alpha.std().item():.6g}")
             print(f"[Phase4 fwd] norm_alpha: mean={norm_alpha.mean().item():.6g}, std={norm_alpha.std().item():.6g}")
             print(f"[Phase4 fwd] T_kV: mean={T_kV.mean().item():.6g}, std={T_kV.std().item():.6g}")
             print(f"[Phase4 fwd] norm_T: mean={norm_T.mean().item():.6g}, std={norm_T.std().item():.6g}")
 
-        # Build network input based on inp_dim
-        # inp_dim=3: [x, norm_alpha, norm_T]
-        # inp_dim=4: [x, norm_alpha, norm_T, sqrt_x]
-        if self.inp_dim == 4:
-            sqrt_x = torch.sqrt(norm_x)
-            network_inp = torch.cat([norm_x, norm_alpha, norm_T, sqrt_x], dim=-1)
-        else:
-            network_inp = torch.cat([norm_x, norm_alpha, norm_T], dim=-1)
+        
 
         h = self.act(self.first(network_inp))
         for layer in self.hiddens:

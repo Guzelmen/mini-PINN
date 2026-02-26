@@ -8,7 +8,7 @@ base_config: &BASE_CONFIG
     ## parameters
   random_seed: 42
 
-  run_name: "xmin_1e-6_endphysw10_8x128_GPU_deriv_loss_cosine_restarts_cosine_weights_5000ep_gradclip250"
+  run_name: "training_4thinp_logx_gpu_best_1e-6_model"
   wandb_notes: ""
 ## wandb parameters
   use_wandb: True  # Set False to disable all wandb logging
@@ -102,6 +102,7 @@ base_config: &BASE_CONFIG
   x_min_threshold: 1e-6       # Minimum x value to keep (points below are removed)
   batch_size: 2048
   shuffle_train: True
+  use_sqrtx: False
 
   ## training parameters
   stage: "train"

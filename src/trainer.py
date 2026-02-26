@@ -309,10 +309,6 @@ def trainer(
             and weighter.data_weight > weighter.physics_weight):
         n_steps = max(1, epochs // data_loss_step_epochs)
         data_weight_decrement = (weighter.data_weight - weighter.physics_weight) / n_steps
-        print(
-            f"Data weight step-decay: {weighter.data_weight:.2f} -> {weighter.physics_weight:.2f} "
-            f"in {n_steps} steps (every {data_loss_step_epochs} epochs, "
-            f"decrement {data_weight_decrement:.4f})")
     else:
         data_weight_decrement = None
 
@@ -376,6 +372,20 @@ def trainer(
         batch_times_loss = []
         batch_times_backprop = []
         batch_times_optim = []
+        # Loss sub-component timers
+        batch_times_loss_residual = []
+        batch_times_loss_bc = []
+        batch_times_loss_data = []
+        batch_times_loss_deriv = []
+        batch_times_loss_combine = []
+        # Residual internals timers
+        batch_times_residual_d2psi = []
+        batch_times_residual_fd = []
+        batch_times_residual_norm = []
+        # Inter-batch bookkeeping timer
+        batch_times_bookkeeping = []
+        # DataLoader iteration timer (next() + tqdm overhead between batches)
+        batch_times_dataloader = []
 
         train_loader_iter = tqdm(
             train, desc=f"Epoch {ep}/{epochs}", leave=True, ncols=100)
@@ -383,8 +393,10 @@ def trainer(
         # Check if hybrid training is enabled
         hybrid_training = getattr(params, 'hybrid_training', False)
 
+        t_batch_boundary = time.time()
         for batch in train_loader_iter:
             t_ta_prefwd = time.time()
+            batch_times_dataloader.append(t_ta_prefwd - t_batch_boundary)
             # Extract inputs (and targets if present in data)
             # DataLoader returns a tuple. If TensorDataset has 2 tensors, batch is (inputs, targets)
             # If TensorDataset has 1 tensor, batch is (inputs,)
@@ -420,7 +432,6 @@ def trainer(
             # Forward pass
             t_ta_fwd = time.time()
             outputs = model(inputs)
-            t_ta_loss = time.time()
 
             if ep % params.save_every == 0:
                 # Detach tensors before saving to avoid gradient tracking issues
@@ -434,7 +445,10 @@ def trainer(
                 epoch_outputs.append(outputs.detach())
                 epoch_d2check.append(d2check.detach())
 
-            # Compute individual losses
+            t_ta_loss = time.time()
+
+            # --- Residual loss ---
+            t_loss_residual_start = time.time()
             if params.phase == 3:
                 residual_name = f"compute_residual_loss_phase2"
             elif params.phase == 4:
@@ -442,14 +456,22 @@ def trainer(
             else:
                 residual_name = f"compute_residual_loss_phase{params.phase}"
             residual_fn = getattr(losses, residual_name)
-            residual_loss = residual_fn(outputs, inputs, params=params)
+            # Pass timing_dict for residual internals profiling (phase 4 only)
+            residual_timing = {}
+            if params.phase == 4:
+                residual_loss = residual_fn(outputs, inputs, params=params, timing_dict=residual_timing)
+            else:
+                residual_loss = residual_fn(outputs, inputs, params=params)
 
             # Optional FMT helper loss (diff training mode)
             if getattr(params, "fmt_help", False):
                 fmt_loss = losses.compute_fmt_loss_phase2(model, inputs, outputs, params)
             else:
                 fmt_loss = torch.tensor(0.0, device=outputs.device)
+            t_loss_residual_end = time.time()
 
+            # --- BC losses ---
+            t_loss_bc_start = time.time()
             if params.mode == "soft":
                 # Phase 4 reuses phase 1 BC functions (BCs are T-independent)
                 if params.phase == 4:
@@ -465,6 +487,7 @@ def trainer(
             else:
                 bc_1_loss = torch.tensor(0.0, device=outputs.device)
                 bc_2_loss = torch.tensor(0.0, device=outputs.device)
+            t_loss_bc_end = time.time()
 
             # Combine losses
             loss_dict = {
@@ -475,7 +498,8 @@ def trainer(
             if getattr(params, "fmt_help", False):
                 loss_dict['fmt'] = fmt_loss
 
-            # Compute data loss for hybrid training
+            # --- Data loss ---
+            t_loss_data_start = time.time()
             use_deriv_loss = getattr(params, 'use_deriv_loss', False)
             _warn_deriv_shape = getattr(params, '_warned_deriv_shape', False)
             if hybrid_training and targets is not None:
@@ -485,8 +509,10 @@ def trainer(
                 loss_dict['data'] = data_loss
             else:
                 data_loss = torch.tensor(0.0, device=outputs.device)
+            t_loss_data_end = time.time()
 
-            # Derivative target loss
+            # --- Derivative loss ---
+            t_loss_deriv_start = time.time()
             if use_deriv_loss and targets is not None:
                 if targets.shape[1] >= 2:
                     deriv_targets_batch = targets[:, 1:2]
@@ -499,6 +525,7 @@ def trainer(
                     deriv_loss = torch.tensor(0.0, device=outputs.device)
             else:
                 deriv_loss = torch.tensor(0.0, device=outputs.device)
+            t_loss_deriv_end = time.time()
 
             # For adaptive weighting: collect raw losses, don't update weights yet
             if weighter.strategy == 'adaptive' or weighter.hybrid_strategy == 'adaptive':
@@ -513,7 +540,8 @@ def trainer(
                 if use_deriv_loss and 'deriv' in loss_dict:
                     raw_losses_for_weighting['deriv'].append(deriv_loss.detach())
 
-            
+            # --- Loss combination ---
+            t_loss_combine_start = time.time()
             if params.phase == 3:
                 totlossname = f"compute_total_loss_phase2"
             elif params.phase == 4:
@@ -522,6 +550,7 @@ def trainer(
                 totlossname = f"compute_total_loss_phase{params.phase}"
             totloss_fn = getattr(losses, totlossname)
             total_loss = totloss_fn(loss_dict, weighter)
+            t_loss_combine_end = time.time()
 
             # Backpropagation
             t_ta_bp = time.time()
@@ -579,6 +608,16 @@ def trainer(
             batch_times_loss.append(t_ta_bp - t_ta_loss)
             batch_times_backprop.append(t_ta_optim - t_ta_bp)
             batch_times_optim.append(t_ta_batch_end - t_ta_optim)
+            # Loss sub-component timings
+            batch_times_loss_residual.append(t_loss_residual_end - t_loss_residual_start)
+            batch_times_loss_bc.append(t_loss_bc_end - t_loss_bc_start)
+            batch_times_loss_data.append(t_loss_data_end - t_loss_data_start)
+            batch_times_loss_deriv.append(t_loss_deriv_end - t_loss_deriv_start)
+            batch_times_loss_combine.append(t_loss_combine_end - t_loss_combine_start)
+            # Residual internals (from timing_dict returned by loss function)
+            batch_times_residual_d2psi.append(residual_timing.get('residual_d2psi', 0.0))
+            batch_times_residual_fd.append(residual_timing.get('residual_fd_integral', 0.0))
+            batch_times_residual_norm.append(residual_timing.get('residual_norm_mse', 0.0))
 
             # Track losses
             epoch_losses['residual'].append(residual_loss.item())
@@ -603,6 +642,10 @@ def trainer(
                 bc2=bc_2_loss.item(),
                 data=data_loss.item() if hybrid_training else 0.0
             )
+            # Inter-batch bookkeeping time (loss tracking, .item() calls, tqdm update)
+            t_ta_bookkeeping_end = time.time()
+            batch_times_bookkeeping.append(t_ta_bookkeeping_end - t_ta_batch_end)
+            t_batch_boundary = t_ta_bookkeeping_end
 
         # ------ Time analysis: per-epoch statistics (sums across batches) ------
         time_analysis_dict[ep] = {
@@ -611,7 +654,23 @@ def trainer(
             "loss_sum": float(np.sum(batch_times_loss)),
             "backprop_sum": float(np.sum(batch_times_backprop)),
             "optim_step_sum": float(np.sum(batch_times_optim)),
+            # Loss sub-components
+            "loss_residual_sum": float(np.sum(batch_times_loss_residual)),
+            "loss_bc_sum": float(np.sum(batch_times_loss_bc)),
+            "loss_data_sum": float(np.sum(batch_times_loss_data)),
+            "loss_deriv_sum": float(np.sum(batch_times_loss_deriv)),
+            "loss_combine_sum": float(np.sum(batch_times_loss_combine)),
+            # Residual internals
+            "loss_residual_d2psi_sum": float(np.sum(batch_times_residual_d2psi)),
+            "loss_residual_fd_sum": float(np.sum(batch_times_residual_fd)),
+            "loss_residual_norm_sum": float(np.sum(batch_times_residual_norm)),
+            # Inter-batch bookkeeping
+            "bookkeeping_sum": float(np.sum(batch_times_bookkeeping)),
+            # DataLoader iteration overhead (next() + tqdm between batches)
+            "dataloader_sum": float(np.sum(batch_times_dataloader)),
         }
+
+        t_postloop_start = time.time()
 
         if ep % params.save_every == 0:
             # Concatenate tensors first, then convert to numpy
@@ -711,6 +770,8 @@ def trainer(
         time_end = time.time()
         time_taken = time_end - time_start
         time_analysis_dict[ep]["epoch_total"] = time_taken
+        # Post-loop overhead (between batch loop end and time_end)
+        time_analysis_dict[ep]["postloop_misc_sum"] = time_end - t_postloop_start
 
         # Print epoch summary
         print(
@@ -915,6 +976,10 @@ def trainer(
                     "val/total_loss": avg_val_total,
                     "info/epoch_validation_time": time_taken_val
                 })
+            # Record validation time (separate from epoch_total)
+            time_analysis_dict[ep]["postloop_val_sum"] = time_taken_val
+        else:
+            time_analysis_dict[ep]["postloop_val_sum"] = 0.0
 
         # Periodically save model weights
         save_weights_every = getattr(params, "save_weights_every", None)
@@ -954,7 +1019,15 @@ def trainer(
     ta_scale = ta_time_scales.get(ta_time_unit, 1.0)
     gpu_type_used = getattr(params, "gpu_type", "L40S")
 
-    ta_metric_names = ["prefwd", "fwd", "loss", "backprop", "optim_step"]
+    ta_metric_names = [
+        "prefwd", "fwd", "loss", "backprop", "optim_step",
+        # Loss sub-components
+        "loss_residual", "loss_bc", "loss_data", "loss_deriv", "loss_combine",
+        # Residual internals
+        "loss_residual_d2psi", "loss_residual_fd", "loss_residual_norm",
+        # Inter-batch and post-loop overhead
+        "bookkeeping", "dataloader", "postloop_misc", "postloop_val",
+    ]
     ta_summary = {
         "n_params": n_params,
         "compute_specs": {

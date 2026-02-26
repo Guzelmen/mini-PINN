@@ -1,3 +1,5 @@
+import time
+
 import torch
 from .utils import sec_deriv_auto, first_deriv_auto, fmt_series
 from .fd_integrals import fermi_dirac_half, compute_lambda, compute_gamma, B_M, C0_M
@@ -549,7 +551,7 @@ def compute_fmt_loss_phase2(model, inputs, outputs, params):
 # Phase 4 losses (Temperature-dependent Thomas-Fermi)
 # =========================
 
-def compute_residual_loss_phase4(outputs, inputs, params, val_stage: bool = False):
+def compute_residual_loss_phase4(outputs, inputs, params, val_stage: bool = False, timing_dict=None):
     """
     Temperature-dependent Thomas-Fermi residual for phase 4:
 
@@ -563,7 +565,7 @@ def compute_residual_loss_phase4(outputs, inputs, params, val_stage: bool = Fals
     Training mode supports:
         - m-weighted residual: LHS = d²ψ/dx² · x^(0.5+m), RHS = (λ³/γ) · x^(1.5+m) · I_{1/2}(η)
         - residual_norm_strategy: "coeff", "relative", or "rhs_only"
-    
+
     Validation mode always uses:
         - Raw residual (no m-weighting): d²ψ/dx² - (λ³/γ) · x · I_{1/2}(η)
         - Fixed "coeff" normalization: divide by λ³/γ
@@ -571,13 +573,21 @@ def compute_residual_loss_phase4(outputs, inputs, params, val_stage: bool = Fals
     Args:
         outputs: ψ(x) predictions, shape [batch, 1]
         inputs: [batch, 3] with columns [x, alpha, T_kV]
-        params: config with debug_mode, loss_type, use_m_loss, m_loss_m_value, 
+        params: config with debug_mode, loss_type, use_m_loss, m_loss_m_value,
                 residual_norm_strategy, etc.
         val_stage: if True, use fixed coeff normalization without m-weighting
+        timing_dict: if provided, records internal sub-timings (keys:
+                     'residual_d2psi', 'residual_fd_integral', 'residual_norm_mse')
 
     Returns:
         residual loss: mean squared residual over the batch
     """
+    _timing = timing_dict is not None
+
+    # --- Sub-timer: autograd second derivative ---
+    if _timing:
+        _t0 = time.time()
+
     # Extract inputs
     x = inputs[:, 0:1]
     alpha = inputs[:, 1:2]
@@ -585,6 +595,13 @@ def compute_residual_loss_phase4(outputs, inputs, params, val_stage: bool = Fals
 
     # Compute second derivative d²ψ/dx²
     d2phi_dx2 = sec_deriv_auto(outputs, inputs, var1=0, var2=0)
+
+    if _timing:
+        timing_dict['residual_d2psi'] = time.time() - _t0
+
+    # --- Sub-timer: physical constants + FD integral ---
+    if _timing:
+        _t0 = time.time()
 
     # Model output is ψ(x)
     if len(outputs.shape) == 2 and outputs.shape[1] == 1:
@@ -623,6 +640,13 @@ def compute_residual_loss_phase4(outputs, inputs, params, val_stage: bool = Fals
 
     # Coefficient λ³/γ
     coeff = (lam ** 3) / gamma
+
+    if _timing:
+        timing_dict['residual_fd_integral'] = time.time() - _t0
+
+    # --- Sub-timer: normalization + MSE ---
+    if _timing:
+        _t0 = time.time()
 
     if val_stage:
         # VALIDATION: Always use rel_l2 normalization, no m-weighting
@@ -688,6 +712,9 @@ def compute_residual_loss_phase4(outputs, inputs, params, val_stage: bool = Fals
         loss = torch.mean(norm_residual ** 2)
     else:
         raise ValueError(f"Unknown loss_type: {params.loss_type}")
+
+    if _timing:
+        timing_dict['residual_norm_mse'] = time.time() - _t0
 
     return loss
 

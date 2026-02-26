@@ -142,13 +142,13 @@ def run_training(params):
 
                     # Phase 4: Val log x diagnostics
                     if getattr(params, 'use_log_x', False):
-                        test_log_x = torch.log(X_test[:, 0:1] + 1e-8)
-                        test_x_stdzd = (test_log_x - x_log_mean) / (x_log_std + 1e-12)
+                        val_log_x = torch.log(X_val[:, 0:1] + 1e-8)
+                        val_x_stdzd = (val_log_x - x_log_mean) / (x_log_std + 1e-12)
                         diag.update({
-                            "norm/test_log_x_mean": float(test_log_x.mean().item()),
-                            "norm/test_log_x_std": float(test_log_x.std(unbiased=False).item()),
-                            "norm/test_log_x_stdzd_mean": float(test_x_stdzd.mean().item()),
-                            "norm/test_log_x_stdzd_std": float(test_x_stdzd.std(unbiased=False).item()),
+                            "norm/val_log_x_mean": float(val_log_x.mean().item()),
+                            "norm/val_log_x_std": float(val_log_x.std(unbiased=False).item()),
+                            "norm/val_log_x_stdzd_mean": float(val_x_stdzd.mean().item()),
+                            "norm/val_log_x_stdzd_std": float(val_x_stdzd.std(unbiased=False).item()),
                         })
 
             if X_test is not None:
