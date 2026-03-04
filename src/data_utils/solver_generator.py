@@ -86,9 +86,9 @@ def generate_solution(alpha, T_kV, n_points=100, tol=1e-5, y_guess=None, w_grid=
 def generate_phase4_solver(
     out_path=None,
     seed=42,
-    n_x=160,
+    n_x=300,
     n_alpha=40,
-    n_T=40,
+    n_T=60,
     tol=1e-5,
     max_nodes=int(2e5)
 ):
@@ -117,27 +117,27 @@ def generate_phase4_solver(
     """
     if out_path is None:
         from ..utils import PROJECT_ROOT
-        out_path = PROJECT_ROOT / "data/phase_4_solver_doubletargets_smallrange.pt"
+        out_path = PROJECT_ROOT / "data/phase_4_solver_extended_coarse.pt"
     
     np.random.seed(seed)
 
     # Initialize wandb
     wandb.login()
     wandb.init(
-        name="phase_4_solver_v4_smallrange_newaddedtarget",
-        notes=f"Alpha ~1-5 (r0 from 5e-11 to 2.5e-10 m) - {n_alpha} vals, T 1-10 keV - {n_T} vals, x ~0-1 (natural solver grid) - {n_x} vals, tol={tol}. \
-        Using previous solutions for initial guess. Max nodes={max_nodes}. Now targets are psi and dpsi/dx, used ffor auxiliary data loss function in training.",
-        group="week9feb",
+        name="phase_4_solver_extended_coarse",
+        notes=f"Alpha ~1-10 (r0 from 5e-11 to 4.8e-10 m) - {n_alpha} vals, T 0.01-10 keV - {n_T} vals, x ~0-1 - {n_x} vals, tol={tol}. Coarse coverage. \
+        Using previous solutions for initial guess. Max nodes={max_nodes}. Now targets are psi and dpsi/dx, used for auxiliary data loss function in training.",
+        group="week02mar",
         project="data_generation",
         entity="guzelmen_msci_project",
     )
     
-    # alpha: small range (r0 from 5e-11 to 2.5e-10 m -> alpha ~ 1 to 5)
-    r0_vals = np.logspace(np.log10(5e-11), np.log10(2.5e-10), n_alpha)
+    # alpha: small range (r0 from 5e-11 to 4.8e-10 m -> alpha ~ 1 to 10)
+    r0_vals = np.logspace(np.log10(5e-11), np.log10(4.8e-10), n_alpha)
     alpha_vals = r0_vals / B_M
     
     # T: narrow range 1 to 10 keV
-    T_vals = np.logspace(np.log10(1.0), np.log10(10.0), n_T)
+    T_vals = np.logspace(np.log10(0.01), np.log10(10.0), n_T)
     
     data = []
     failed = 0
@@ -163,7 +163,7 @@ def generate_phase4_solver(
 
         # --- Find closest solved (alpha, T) for initial guess ---
         if solved:
-            closest = min(solved, key=lambda s: (s['alpha']-alpha)**2 + (s['T']-T)**2)
+            closest = min(solved, key=lambda s: (np.log(s['alpha'])-np.log(alpha))**2 + (np.log(s['T'])-np.log(T))**2)
             beta_guess = np.interp(w_grid, closest['w'], closest['beta'])
             dbeta_guess = np.interp(w_grid, closest['w'], closest['dbeta'])
             y_guess = np.vstack((beta_guess, dbeta_guess))

@@ -617,7 +617,7 @@ class Model_hard_phase4(nn.Module):
         norm_alpha = self.scale_alpha(alpha)
         norm_T = self.scale_T(T_kV)
         if self.use_log_x:
-            log_x_feat = self.scale_x(x)
+            log_x_feat = self.scale_x(x.detach())
             network_inp = torch.cat([x, norm_alpha, norm_T, log_x_feat], dim=-1)
         elif self.use_sqrtx:
             sqrt_x = torch.sqrt(x)
