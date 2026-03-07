@@ -132,7 +132,7 @@ def generate_phase4_solver(
         entity="guzelmen_msci_project",
     )
     
-    # alpha: small range (r0 from 5e-11 to 4.8e-10 m -> alpha ~ 1 to 10)
+    # alpha range (r0 from 5e-11 to 4.8e-10 m -> alpha ~ 1 to 10)
     r0_vals = np.logspace(np.log10(5e-11), np.log10(4.8e-10), n_alpha)
     alpha_vals = r0_vals / B_M
     
