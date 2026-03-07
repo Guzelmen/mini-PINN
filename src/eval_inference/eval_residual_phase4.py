@@ -22,11 +22,11 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import matplotlib.tri as tri
 
-from .utils import PROJECT_ROOT, sec_deriv_auto
-from .fd_integrals import fermi_dirac_half, compute_lambda, compute_gamma
+from ..utils import PROJECT_ROOT, sec_deriv_auto
+from ..fd_integrals import fermi_dirac_half, compute_lambda, compute_gamma
 from .color_map import find_latest_state_path
 from .eval_residual_phase2 import fetch_config_from_wandb, build_model
-from .data_utils.loader import load_data
+from ..data_utils.loader import load_data
 
 
 def parse_args():

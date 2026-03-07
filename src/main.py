@@ -4,7 +4,7 @@ Will run training and inference from here.
 import random
 import os
 from . import models
-from .color_map import (
+from .eval_inference.color_map import (
     find_latest_state_path,
     build_grid,
     compute_pointwise_residual_sq,
@@ -13,7 +13,7 @@ from .color_map import (
 )
 from .trainer import trainer
 from .data_utils.loader import load_data, get_data_loaders
-from . import eval_predictions as ev
+from .eval_inference import eval_predictions as ev
 import torch
 import numpy as np
 import argparse
@@ -54,169 +54,245 @@ def run_training(params):
     random.seed(params.random_seed)
     np.random.seed(params.random_seed)
 
-    data = load_data(params)
-    
-    # Extract data splits (always, not conditionally)
-    X_train = data["train"]
-    X_val = data["val"]
-    X_test = data["test"]
+    use_extended = getattr(params, 'use_extended_loader', False)
 
-    # Compute normalization stats on log1p(alpha) using TRAIN ONLY (avoid val/test leakage),
-    # then log diagnostics for val/test distributions. These stats are stored on `params`
-    # for the model to use during forward passes.
-    try:
-        if int(params.phase) != 1 and str(params.mode).strip() == "hard":
+    if use_extended:
+        from .data_utils.extended_loader import load_extended_data
+        from torch.utils.data import DataLoader, TensorDataset
+        data = load_extended_data(params)
 
-            train_log_alpha = torch.log1p(X_train[:, 1:2])
-            a_mean = float(train_log_alpha.mean().item())
-            a_std = float(train_log_alpha.std(unbiased=False).item())
+        # Unpack norm stats — bypasses the existing try/except block entirely
+        ns = data['norm_stats']
+        params.norm_mode     = "standardize"
+        params.standard_mean = ns['a_mean']
+        params.standard_std  = ns['a_std']
+        params.T_mean        = ns['T_mean']
+        params.T_std         = ns['T_std']
+        if getattr(params, 'use_log_x', False):
+            params.x_log_mean = ns['x_log_mean']
+            params.x_log_std  = ns['x_log_std']
 
-            params.norm_mode = "standardize"
-            params.standard_mean = a_mean
-            params.standard_std = a_std
+        # Print and log to wandb
+        print(f"[norm] Extended loader stats: a=({ns['a_mean']:.4f}, {ns['a_std']:.4f}), "
+              f"T=({ns['T_mean']:.4f}, {ns['T_std']:.4f})")
+        edges = data['edges']
+        if use_wandb:
+            wandb.config.update({
+                "norm/a_mean":      ns['a_mean'],
+                "norm/a_std":       ns['a_std'],
+                "norm/T_mean":      ns['T_mean'],
+                "norm/T_std":       ns['T_std'],
+                "edges/alpha_lo":   edges['alpha_lo'],
+                "edges/alpha_hi":   edges['alpha_hi'],
+                "edges/T_lo":       edges['T_lo'],
+                "edges/T_hi":       edges['T_hi'],
+            }, allow_val_change=True)
+
+        X_train = data['train']
+        X_val   = data['interp_val']
+
+        # Build data_splits for get_data_loaders — reuse existing machinery
+        # Use ood_single as "test" slot so existing loader infrastructure works
+        data_splits = {
+            'train':         data['train'],
+            'val':           data['interp_val'],
+            'test':          data['ood_single'],
+            'train_targets': data['train_targets'],
+            'val_targets':   data['interp_val_targets'],
+            'test_targets':  data['ood_single_targets'],
+        }
+        data_loaders = get_data_loaders(
+            data_splits, batch_size=params.batch_size, shuffle_train=params.shuffle_train
+        )
+
+        # Build ood_corner loader separately
+        pin = torch.cuda.is_available()
+        ood_corner_dataset = TensorDataset(data['ood_corner'], data['ood_corner_targets'])
+        ood_corner_loader = DataLoader(
+            ood_corner_dataset, batch_size=params.batch_size, shuffle=False, pin_memory=pin
+        )
+
+    else:
+        # ---- EXISTING CODE PATH ----
+        data = load_data(params)
+
+        # Extract data splits (always, not conditionally)
+        X_train = data["train"]
+        X_val = data["val"]
+        X_test = data["test"]
+
+        ood_corner_loader = None
+
+        # Compute normalization stats on log1p(alpha) using TRAIN ONLY (avoid val/test leakage),
+        # then log diagnostics for val/test distributions. These stats are stored on `params`
+        # for the model to use during forward passes.
+        try:
+            if int(params.phase) != 1 and str(params.mode).strip() == "hard":
+
+                train_log_alpha = torch.log1p(X_train[:, 1:2])
+                a_mean = float(train_log_alpha.mean().item())
+                a_std = float(train_log_alpha.std(unbiased=False).item())
+
+                params.norm_mode = "standardize"
+                params.standard_mean = a_mean
+                params.standard_std = a_std
+                print(
+                    f"[norm] Train standardize log1p(alpha): mean={a_mean:.6g}, std={a_std:.6g}"
+                )
+
+                # Phase 4: Also compute T normalization stats
+                if int(params.phase) == 4:
+                    train_log_T = torch.log1p(X_train[:, 2:3])
+                    T_mean = float(train_log_T.mean().item())
+                    T_std = float(train_log_T.std(unbiased=False).item())
+                    params.T_mean = T_mean
+                    params.T_std = T_std
+                    print(
+                        f"[norm] Train standardize log1p(T): mean={T_mean:.6g}, std={T_std:.6g}"
+                    )
+
+                    # Phase 4: Optionally compute log x normalization stats
+                    if getattr(params, 'use_log_x', False):
+                        train_log_x = torch.log(X_train[:, 0:1] + 1e-8)
+                        x_log_mean = float(train_log_x.mean().item())
+                        x_log_std = float(train_log_x.std(unbiased=False).item())
+                        params.x_log_mean = x_log_mean
+                        params.x_log_std = x_log_std
+                        print(f"[norm] Train standardize log(x): mean={x_log_mean:.6g}, std={x_log_std:.6g}")
+
+
+                # Log diagnostics for val/test (raw and standardized with train stats)
+                diag = {
+                    "norm/train_log1p_alpha_mean": float(train_log_alpha.mean().item()),
+                    "norm/train_log1p_alpha_std": float(train_log_alpha.std(unbiased=False).item()),
+                    "norm/fit_log1p_alpha_mean": a_mean,
+                    "norm/fit_log1p_alpha_std": a_std,
+                }
+
+                if X_val is not None:
+                    val_log_alpha = torch.log1p(X_val[:, 1:2])
+                    val_stdzd = (val_log_alpha - a_mean) / (a_std + 1e-12)
+                    diag.update({
+                        "norm/val_log1p_alpha_mean": float(val_log_alpha.mean().item()),
+                        "norm/val_log1p_alpha_std": float(val_log_alpha.std(unbiased=False).item()),
+                        "norm/val_log1p_alpha_stdzd_mean": float(val_stdzd.mean().item()),
+                        "norm/val_log1p_alpha_stdzd_std": float(val_stdzd.std(unbiased=False).item()),
+                    })
+                    print(
+                        f"[norm] Val log1p(alpha): mean={diag['norm/val_log1p_alpha_mean']:.6g}, "
+                        f"std={diag['norm/val_log1p_alpha_std']:.6g} | "
+                        f"stdzd(mean,std)=({diag['norm/val_log1p_alpha_stdzd_mean']:.6g}, "
+                        f"{diag['norm/val_log1p_alpha_stdzd_std']:.6g})"
+                    )
+
+                    # Phase 4: Val T diagnostics
+                    if int(params.phase) == 4:
+                        val_log_T = torch.log1p(X_val[:, 2:3])
+                        val_T_stdzd = (val_log_T - T_mean) / (T_std + 1e-12)
+                        diag.update({
+                            "norm/val_log1p_T_mean": float(val_log_T.mean().item()),
+                            "norm/val_log1p_T_std": float(val_log_T.std(unbiased=False).item()),
+                            "norm/val_log1p_T_stdzd_mean": float(val_T_stdzd.mean().item()),
+                            "norm/val_log1p_T_stdzd_std": float(val_T_stdzd.std(unbiased=False).item()),
+                        })
+                        print(
+                            f"[norm] Val log1p(T): mean={diag['norm/val_log1p_T_mean']:.6g}, "
+                            f"std={diag['norm/val_log1p_T_std']:.6g} | "
+                            f"stdzd(mean,std)=({diag['norm/val_log1p_T_stdzd_mean']:.6g}, "
+                            f"{diag['norm/val_log1p_T_stdzd_std']:.6g})"
+                        )
+
+                        # Phase 4: Val log x diagnostics
+                        if getattr(params, 'use_log_x', False):
+                            val_log_x = torch.log(X_val[:, 0:1] + 1e-8)
+                            val_x_stdzd = (val_log_x - x_log_mean) / (x_log_std + 1e-12)
+                            diag.update({
+                                "norm/val_log_x_mean": float(val_log_x.mean().item()),
+                                "norm/val_log_x_std": float(val_log_x.std(unbiased=False).item()),
+                                "norm/val_log_x_stdzd_mean": float(val_x_stdzd.mean().item()),
+                                "norm/val_log_x_stdzd_std": float(val_x_stdzd.std(unbiased=False).item()),
+                            })
+
+                if X_test is not None:
+                    test_log_alpha = torch.log1p(X_test[:, 1:2])
+                    test_stdzd = (test_log_alpha - a_mean) / (a_std + 1e-12)
+                    diag.update({
+                        "norm/test_log1p_alpha_mean": float(test_log_alpha.mean().item()),
+                        "norm/test_log1p_alpha_std": float(test_log_alpha.std(unbiased=False).item()),
+                        "norm/test_log1p_alpha_stdzd_mean": float(test_stdzd.mean().item()),
+                        "norm/test_log1p_alpha_stdzd_std": float(test_stdzd.std(unbiased=False).item()),
+                    })
+                    print(
+                        f"[norm] Test log1p(alpha): mean={diag['norm/test_log1p_alpha_mean']:.6g}, "
+                        f"std={diag['norm/test_log1p_alpha_std']:.6g} | "
+                        f"stdzd(mean,std)=({diag['norm/test_log1p_alpha_stdzd_mean']:.6g}, "
+                        f"{diag['norm/test_log1p_alpha_stdzd_std']:.6g})"
+                    )
+
+                    # Phase 4: Test T diagnostics
+                    if int(params.phase) == 4:
+                        test_log_T = torch.log1p(X_test[:, 2:3])
+                        test_T_stdzd = (test_log_T - T_mean) / (T_std + 1e-12)
+                        diag.update({
+                            "norm/test_log1p_T_mean": float(test_log_T.mean().item()),
+                            "norm/test_log1p_T_std": float(test_log_T.std(unbiased=False).item()),
+                            "norm/test_log1p_T_stdzd_mean": float(test_T_stdzd.mean().item()),
+                            "norm/test_log1p_T_stdzd_std": float(test_T_stdzd.std(unbiased=False).item()),
+                        })
+                        print(
+                            f"[norm] Test log1p(T): mean={diag['norm/test_log1p_T_mean']:.6g}, "
+                            f"std={diag['norm/test_log1p_T_std']:.6g} | "
+                            f"stdzd(mean,std)=({diag['norm/test_log1p_T_stdzd_mean']:.6g}, "
+                            f"{diag['norm/test_log1p_T_stdzd_std']:.6g})"
+                        )
+
+                        # Phase 4: Test log x diagnostics
+                        if getattr(params, 'use_log_x', False):
+                            test_log_x = torch.log(X_test[:, 0:1] + 1e-8)
+                            test_x_stdzd = (test_log_x - x_log_mean) / (x_log_std + 1e-12)
+                            diag.update({
+                                "norm/test_log_x_mean": float(test_log_x.mean().item()),
+                                "norm/test_log_x_std": float(test_log_x.std(unbiased=False).item()),
+                                "norm/test_log_x_stdzd_mean": float(test_x_stdzd.mean().item()),
+                                "norm/test_log_x_stdzd_std": float(test_x_stdzd.std(unbiased=False).item()),
+                            })
+
+                # Ensure these derived params/diagnostics get into wandb (initial config update happened earlier)
+                try:
+                    wandb_update = {
+                        "norm_mode": params.norm_mode,
+                        "standard_mean": params.standard_mean,
+                        "standard_std": params.standard_std,
+                        **diag,
+                    }
+                    # Phase 4: Include T normalization params
+                    if int(params.phase) == 4:
+                        wandb_update["T_mean"] = params.T_mean
+                        wandb_update["T_std"] = params.T_std
+                        if getattr(params, 'use_log_x', False):
+                            wandb_update["x_log_mean"] = params.x_log_mean
+                            wandb_update["x_log_std"] = params.x_log_std
+                    if use_wandb:
+                        wandb.config.update(wandb_update, allow_val_change=True)
+                except Exception:
+                    pass
+        except Exception as e:
             print(
-                f"[norm] Train standardize log1p(alpha): mean={a_mean:.6g}, std={a_std:.6g}"
+                f"[norm] Warning: failed to compute global mean/std for log1p(alpha): {e}"
             )
 
-            # Phase 4: Also compute T normalization stats
-            if int(params.phase) == 4:
-                train_log_T = torch.log1p(X_train[:, 2:3])
-                T_mean = float(train_log_T.mean().item())
-                T_std = float(train_log_T.std(unbiased=False).item())
-                params.T_mean = T_mean
-                params.T_std = T_std
-                print(
-                    f"[norm] Train standardize log1p(T): mean={T_mean:.6g}, std={T_std:.6g}"
-                )
+        # Create data loaders (existing path: random split from load_data)
+        data_splits = {"train": X_train, "val": X_val, "test": X_test}
 
-                # Phase 4: Optionally compute log x normalization stats
-                if getattr(params, 'use_log_x', False):
-                    train_log_x = torch.log(X_train[:, 0:1] + 1e-8)
-                    x_log_mean = float(train_log_x.mean().item())
-                    x_log_std = float(train_log_x.std(unbiased=False).item())
-                    params.x_log_mean = x_log_mean
-                    params.x_log_std = x_log_std
-                    print(f"[norm] Train standardize log(x): mean={x_log_mean:.6g}, std={x_log_std:.6g}")
+        # Include targets if they exist in the data
+        if "train_targets" in data:
+            data_splits["train_targets"] = data["train_targets"]
+            data_splits["val_targets"] = data["val_targets"]
+            data_splits["test_targets"] = data["test_targets"]
+            print(f"Including targets in data loaders: train={data['train_targets'].shape}, val={data['val_targets'].shape}, test={data['test_targets'].shape}")
 
-
-            # Log diagnostics for val/test (raw and standardized with train stats)
-            diag = {
-                "norm/train_log1p_alpha_mean": float(train_log_alpha.mean().item()),
-                "norm/train_log1p_alpha_std": float(train_log_alpha.std(unbiased=False).item()),
-                "norm/fit_log1p_alpha_mean": a_mean,
-                "norm/fit_log1p_alpha_std": a_std,
-            }
-
-            if X_val is not None:
-                val_log_alpha = torch.log1p(X_val[:, 1:2])
-                val_stdzd = (val_log_alpha - a_mean) / (a_std + 1e-12)
-                diag.update({
-                    "norm/val_log1p_alpha_mean": float(val_log_alpha.mean().item()),
-                    "norm/val_log1p_alpha_std": float(val_log_alpha.std(unbiased=False).item()),
-                    "norm/val_log1p_alpha_stdzd_mean": float(val_stdzd.mean().item()),
-                    "norm/val_log1p_alpha_stdzd_std": float(val_stdzd.std(unbiased=False).item()),
-                })
-                print(
-                    f"[norm] Val log1p(alpha): mean={diag['norm/val_log1p_alpha_mean']:.6g}, "
-                    f"std={diag['norm/val_log1p_alpha_std']:.6g} | "
-                    f"stdzd(mean,std)=({diag['norm/val_log1p_alpha_stdzd_mean']:.6g}, "
-                    f"{diag['norm/val_log1p_alpha_stdzd_std']:.6g})"
-                )
-
-                # Phase 4: Val T diagnostics
-                if int(params.phase) == 4:
-                    val_log_T = torch.log1p(X_val[:, 2:3])
-                    val_T_stdzd = (val_log_T - T_mean) / (T_std + 1e-12)
-                    diag.update({
-                        "norm/val_log1p_T_mean": float(val_log_T.mean().item()),
-                        "norm/val_log1p_T_std": float(val_log_T.std(unbiased=False).item()),
-                        "norm/val_log1p_T_stdzd_mean": float(val_T_stdzd.mean().item()),
-                        "norm/val_log1p_T_stdzd_std": float(val_T_stdzd.std(unbiased=False).item()),
-                    })
-                    print(
-                        f"[norm] Val log1p(T): mean={diag['norm/val_log1p_T_mean']:.6g}, "
-                        f"std={diag['norm/val_log1p_T_std']:.6g} | "
-                        f"stdzd(mean,std)=({diag['norm/val_log1p_T_stdzd_mean']:.6g}, "
-                        f"{diag['norm/val_log1p_T_stdzd_std']:.6g})"
-                    )
-
-                    # Phase 4: Val log x diagnostics
-                    if getattr(params, 'use_log_x', False):
-                        val_log_x = torch.log(X_val[:, 0:1] + 1e-8)
-                        val_x_stdzd = (val_log_x - x_log_mean) / (x_log_std + 1e-12)
-                        diag.update({
-                            "norm/val_log_x_mean": float(val_log_x.mean().item()),
-                            "norm/val_log_x_std": float(val_log_x.std(unbiased=False).item()),
-                            "norm/val_log_x_stdzd_mean": float(val_x_stdzd.mean().item()),
-                            "norm/val_log_x_stdzd_std": float(val_x_stdzd.std(unbiased=False).item()),
-                        })
-
-            if X_test is not None:
-                test_log_alpha = torch.log1p(X_test[:, 1:2])
-                test_stdzd = (test_log_alpha - a_mean) / (a_std + 1e-12)
-                diag.update({
-                    "norm/test_log1p_alpha_mean": float(test_log_alpha.mean().item()),
-                    "norm/test_log1p_alpha_std": float(test_log_alpha.std(unbiased=False).item()),
-                    "norm/test_log1p_alpha_stdzd_mean": float(test_stdzd.mean().item()),
-                    "norm/test_log1p_alpha_stdzd_std": float(test_stdzd.std(unbiased=False).item()),
-                })
-                print(
-                    f"[norm] Test log1p(alpha): mean={diag['norm/test_log1p_alpha_mean']:.6g}, "
-                    f"std={diag['norm/test_log1p_alpha_std']:.6g} | "
-                    f"stdzd(mean,std)=({diag['norm/test_log1p_alpha_stdzd_mean']:.6g}, "
-                    f"{diag['norm/test_log1p_alpha_stdzd_std']:.6g})"
-                )
-
-                # Phase 4: Test T diagnostics
-                if int(params.phase) == 4:
-                    test_log_T = torch.log1p(X_test[:, 2:3])
-                    test_T_stdzd = (test_log_T - T_mean) / (T_std + 1e-12)
-                    diag.update({
-                        "norm/test_log1p_T_mean": float(test_log_T.mean().item()),
-                        "norm/test_log1p_T_std": float(test_log_T.std(unbiased=False).item()),
-                        "norm/test_log1p_T_stdzd_mean": float(test_T_stdzd.mean().item()),
-                        "norm/test_log1p_T_stdzd_std": float(test_T_stdzd.std(unbiased=False).item()),
-                    })
-                    print(
-                        f"[norm] Test log1p(T): mean={diag['norm/test_log1p_T_mean']:.6g}, "
-                        f"std={diag['norm/test_log1p_T_std']:.6g} | "
-                        f"stdzd(mean,std)=({diag['norm/test_log1p_T_stdzd_mean']:.6g}, "
-                        f"{diag['norm/test_log1p_T_stdzd_std']:.6g})"
-                    )
-
-                    # Phase 4: Test log x diagnostics
-                    if getattr(params, 'use_log_x', False):
-                        test_log_x = torch.log(X_test[:, 0:1] + 1e-8)
-                        test_x_stdzd = (test_log_x - x_log_mean) / (x_log_std + 1e-12)
-                        diag.update({
-                            "norm/test_log_x_mean": float(test_log_x.mean().item()),
-                            "norm/test_log_x_std": float(test_log_x.std(unbiased=False).item()),
-                            "norm/test_log_x_stdzd_mean": float(test_x_stdzd.mean().item()),
-                            "norm/test_log_x_stdzd_std": float(test_x_stdzd.std(unbiased=False).item()),
-                        })
-
-            # Ensure these derived params/diagnostics get into wandb (initial config update happened earlier)
-            try:
-                wandb_update = {
-                    "norm_mode": params.norm_mode,
-                    "standard_mean": params.standard_mean,
-                    "standard_std": params.standard_std,
-                    **diag,
-                }
-                # Phase 4: Include T normalization params
-                if int(params.phase) == 4:
-                    wandb_update["T_mean"] = params.T_mean
-                    wandb_update["T_std"] = params.T_std
-                    if getattr(params, 'use_log_x', False):
-                        wandb_update["x_log_mean"] = params.x_log_mean
-                        wandb_update["x_log_std"] = params.x_log_std
-                if use_wandb:
-                    wandb.config.update(wandb_update, allow_val_change=True)
-            except Exception:
-                pass
-    except Exception as e:
-        print(
-            f"[norm] Warning: failed to compute global mean/std for log1p(alpha): {e}"
+        data_loaders = get_data_loaders(
+            data_splits, batch_size=params.batch_size, shuffle_train=params.shuffle_train
         )
 
     # Optional: if we are in test stage, pre-load the latest state dict so we can
@@ -265,22 +341,6 @@ def run_training(params):
             latest_state_path = None
             test_state_dict = None
 
-    # Create data loaders.
-    # Note: at this point X_train/X_val/X_test are the exact split tensors we want to feed.
-    # Using them explicitly avoids confusion (and makes it easy to insert preprocessing later).
-    data_splits = {"train": X_train, "val": X_val, "test": X_test}
-    
-    # Include targets if they exist in the data
-    if "train_targets" in data:
-        data_splits["train_targets"] = data["train_targets"]
-        data_splits["val_targets"] = data["val_targets"]
-        data_splits["test_targets"] = data["test_targets"]
-        print(f"Including targets in data loaders: train={data['train_targets'].shape}, val={data['val_targets'].shape}, test={data['test_targets'].shape}")
-    
-    data_loaders = get_data_loaders(
-        data_splits, batch_size=params.batch_size, shuffle_train=params.shuffle_train
-    )
-
     train_loader = data_loaders["train"]
     val_loader = data_loaders["val"]
     test_loader = data_loaders["test"]
@@ -307,7 +367,11 @@ def run_training(params):
         # train the model
         t_prelim_end = time.time()
         prelim_time = t_prelim_end - t_prelim_start
-        trainer(model, train_loader, val_loader, params, prelim_time=prelim_time)
+        trainer(
+            model, train_loader, val_loader, params, prelim_time=prelim_time,
+            ood_single_loader=data_loaders['test'] if use_extended else None,
+            ood_corner_loader=ood_corner_loader,
+        )
         
         # Plotting (only if plot_auto is True)
         if params.plot_auto and params.save_preds:

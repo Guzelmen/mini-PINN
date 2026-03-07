@@ -191,9 +191,12 @@ def trainer(
     val,
     params,
     prelim_time=0.0,
+    ood_single_loader=None,
+    ood_corner_loader=None,
 ):
     device = getattr(params, "device", torch.device("cpu"))
     epochs = params.epochs
+    ood_eval_interval = getattr(params, 'ood_eval_interval', 500)
 
     # Initialize LossWeighter
     if params.phase == 3:
@@ -981,6 +984,220 @@ def trainer(
         else:
             time_analysis_dict[ep]["postloop_val_sum"] = 0.0
 
+        # --- OOD single-axis eval ---
+        if ood_single_loader is not None and ep % ood_eval_interval == 0:
+            time_start_ood_single = time.time()
+            model.eval()
+            ood_single_losses = {'residual': [], 'bc_1': [], 'bc_2': [], 'total': []}
+            if getattr(params, "fmt_help", False):
+                ood_single_losses['fmt'] = []
+            if getattr(params, 'hybrid_training', False):
+                ood_single_losses['data'] = []
+                ood_single_losses['physics'] = []
+            if getattr(params, 'use_deriv_loss', False):
+                ood_single_losses['deriv'] = []
+
+            for batch in ood_single_loader:
+                inputs = batch[0].to(device)
+                if len(batch) > 1:
+                    targets = batch[1].to(device)
+                else:
+                    targets = None
+                if getattr(params, 'filter_x_min', False):
+                    inputs[:, 0].clamp_(max=1.0)
+                else:
+                    inputs[:, 0].clamp_(min=1e-6, max=1.0)
+                inputs.requires_grad_(True)
+                outputs = model(inputs)
+
+                if params.phase == 3:
+                    residual_name = f"compute_residual_loss_phase2"
+                elif params.phase == 4:
+                    residual_name = f"compute_residual_loss_phase4"
+                else:
+                    residual_name = f"compute_residual_loss_phase{params.phase}"
+                residual_fn = getattr(losses, residual_name)
+                residual_loss = residual_fn(outputs, inputs, params=params, val_stage=True)
+
+                if getattr(params, "fmt_help", False):
+                    fmt_loss = losses.compute_fmt_loss_phase2(model, inputs, outputs, params)
+                else:
+                    fmt_loss = torch.tensor(0.0, device=outputs.device)
+
+                if params.mode == "soft":
+                    if params.phase == 4:
+                        bc1name = f"compute_bc_loss_1_phase4"
+                        bc2name = f"compute_bc_loss_2_phase4"
+                    else:
+                        bc1name = f"compute_bc_loss_1_phase{params.phase}"
+                        bc2name = f"compute_bc_loss_2_phase{params.phase}"
+                    bc1_fn = getattr(losses, bc1name)
+                    bc2_fn = getattr(losses, bc2name)
+                    bc_1_loss = bc1_fn(outputs, inputs)
+                    bc_2_loss = bc2_fn(outputs, inputs)
+                else:
+                    bc_1_loss = torch.tensor(0.0, device=outputs.device)
+                    bc_2_loss = torch.tensor(0.0, device=outputs.device)
+
+                ood_single_losses['residual'].append(residual_loss.item())
+                ood_single_losses['bc_1'].append(bc_1_loss.item())
+                ood_single_losses['bc_2'].append(bc_2_loss.item())
+                if getattr(params, "fmt_help", False):
+                    ood_single_losses['fmt'].append(fmt_loss.item())
+
+                use_deriv_loss = getattr(params, 'use_deriv_loss', False)
+                if hybrid_training and targets is not None:
+                    psi_targets = targets[:, 0:1]
+                    val_data_loss = losses.compute_data_loss_phase4(outputs, psi_targets, params, val_stage=True)
+                    ood_single_losses['data'].append(val_data_loss.item())
+                else:
+                    val_data_loss = torch.tensor(0.0, device=outputs.device)
+
+                if use_deriv_loss and targets is not None and targets.shape[1] >= 2:
+                    val_deriv_loss = losses.compute_deriv_loss_phase4(outputs, inputs, targets[:, 1:2], params, val_stage=True)
+                    ood_single_losses['deriv'].append(val_deriv_loss.item())
+                else:
+                    val_deriv_loss = torch.tensor(0.0, device=outputs.device)
+
+                val_loss_dict = {'residual': residual_loss, 'bc_1': bc_1_loss, 'bc_2': bc_2_loss}
+                if getattr(params, "fmt_help", False):
+                    val_loss_dict['fmt'] = fmt_loss
+                val_physics_loss = weighter.get_physics_loss(val_loss_dict) if hasattr(weighter, 'get_physics_loss') else residual_loss
+                if hybrid_training and targets is not None:
+                    ood_single_losses['physics'].append(val_physics_loss.item() if torch.is_tensor(val_physics_loss) else val_physics_loss)
+                if hybrid_training and targets is not None:
+                    val_total_loss = val_physics_loss + val_data_loss
+                    if use_deriv_loss and targets.shape[1] >= 2:
+                        val_total_loss = val_total_loss + val_deriv_loss
+                else:
+                    val_total_loss = val_physics_loss
+                ood_single_losses['total'].append(val_total_loss.item() if torch.is_tensor(val_total_loss) else val_total_loss)
+
+            avg_ood_single_residual = np.mean(ood_single_losses['residual'])
+            avg_ood_single_total = np.mean(ood_single_losses['total'])
+            avg_ood_single_data = np.mean(ood_single_losses['data']) if 'data' in ood_single_losses and len(ood_single_losses['data']) > 0 else 0.0
+            avg_ood_single_deriv = np.mean(ood_single_losses['deriv']) if 'deriv' in ood_single_losses and len(ood_single_losses['deriv']) > 0 else 0.0
+            time_taken_ood_single = time.time() - time_start_ood_single
+
+            print(f"  [ood_single] loss = {avg_ood_single_total:.6e}")
+            if getattr(params, 'use_wandb', True):
+                wandb.log({
+                    "val_ood_single/pde_loss": avg_ood_single_residual,
+                    **({"val_ood_single/data_loss": avg_ood_single_data} if getattr(params, 'hybrid_training', False) else {}),
+                    **({"val_ood_single/deriv_loss": avg_ood_single_deriv} if getattr(params, 'use_deriv_loss', False) else {}),
+                    "val_ood_single/total_loss": avg_ood_single_total,
+                })
+            time_analysis_dict[ep]["ood_single_val_sum"] = time_taken_ood_single
+        else:
+            time_analysis_dict[ep]["ood_single_val_sum"] = 0.0
+
+        # --- OOD corner eval (final epoch only) ---
+        if ood_corner_loader is not None and ep == epochs:
+            time_start_ood_corner = time.time()
+            model.eval()
+            ood_corner_losses = {'residual': [], 'bc_1': [], 'bc_2': [], 'total': []}
+            if getattr(params, "fmt_help", False):
+                ood_corner_losses['fmt'] = []
+            if getattr(params, 'hybrid_training', False):
+                ood_corner_losses['data'] = []
+                ood_corner_losses['physics'] = []
+            if getattr(params, 'use_deriv_loss', False):
+                ood_corner_losses['deriv'] = []
+
+            for batch in ood_corner_loader:
+                inputs = batch[0].to(device)
+                if len(batch) > 1:
+                    targets = batch[1].to(device)
+                else:
+                    targets = None
+                if getattr(params, 'filter_x_min', False):
+                    inputs[:, 0].clamp_(max=1.0)
+                else:
+                    inputs[:, 0].clamp_(min=1e-6, max=1.0)
+                inputs.requires_grad_(True)
+                outputs = model(inputs)
+
+                if params.phase == 3:
+                    residual_name = f"compute_residual_loss_phase2"
+                elif params.phase == 4:
+                    residual_name = f"compute_residual_loss_phase4"
+                else:
+                    residual_name = f"compute_residual_loss_phase{params.phase}"
+                residual_fn = getattr(losses, residual_name)
+                residual_loss = residual_fn(outputs, inputs, params=params, val_stage=True)
+
+                if getattr(params, "fmt_help", False):
+                    fmt_loss = losses.compute_fmt_loss_phase2(model, inputs, outputs, params)
+                else:
+                    fmt_loss = torch.tensor(0.0, device=outputs.device)
+
+                if params.mode == "soft":
+                    if params.phase == 4:
+                        bc1name = f"compute_bc_loss_1_phase4"
+                        bc2name = f"compute_bc_loss_2_phase4"
+                    else:
+                        bc1name = f"compute_bc_loss_1_phase{params.phase}"
+                        bc2name = f"compute_bc_loss_2_phase{params.phase}"
+                    bc1_fn = getattr(losses, bc1name)
+                    bc2_fn = getattr(losses, bc2name)
+                    bc_1_loss = bc1_fn(outputs, inputs)
+                    bc_2_loss = bc2_fn(outputs, inputs)
+                else:
+                    bc_1_loss = torch.tensor(0.0, device=outputs.device)
+                    bc_2_loss = torch.tensor(0.0, device=outputs.device)
+
+                ood_corner_losses['residual'].append(residual_loss.item())
+                ood_corner_losses['bc_1'].append(bc_1_loss.item())
+                ood_corner_losses['bc_2'].append(bc_2_loss.item())
+                if getattr(params, "fmt_help", False):
+                    ood_corner_losses['fmt'].append(fmt_loss.item())
+
+                use_deriv_loss = getattr(params, 'use_deriv_loss', False)
+                if hybrid_training and targets is not None:
+                    psi_targets = targets[:, 0:1]
+                    val_data_loss = losses.compute_data_loss_phase4(outputs, psi_targets, params, val_stage=True)
+                    ood_corner_losses['data'].append(val_data_loss.item())
+                else:
+                    val_data_loss = torch.tensor(0.0, device=outputs.device)
+
+                if use_deriv_loss and targets is not None and targets.shape[1] >= 2:
+                    val_deriv_loss = losses.compute_deriv_loss_phase4(outputs, inputs, targets[:, 1:2], params, val_stage=True)
+                    ood_corner_losses['deriv'].append(val_deriv_loss.item())
+                else:
+                    val_deriv_loss = torch.tensor(0.0, device=outputs.device)
+
+                val_loss_dict = {'residual': residual_loss, 'bc_1': bc_1_loss, 'bc_2': bc_2_loss}
+                if getattr(params, "fmt_help", False):
+                    val_loss_dict['fmt'] = fmt_loss
+                val_physics_loss = weighter.get_physics_loss(val_loss_dict) if hasattr(weighter, 'get_physics_loss') else residual_loss
+                if hybrid_training and targets is not None:
+                    ood_corner_losses['physics'].append(val_physics_loss.item() if torch.is_tensor(val_physics_loss) else val_physics_loss)
+                if hybrid_training and targets is not None:
+                    val_total_loss = val_physics_loss + val_data_loss
+                    if use_deriv_loss and targets.shape[1] >= 2:
+                        val_total_loss = val_total_loss + val_deriv_loss
+                else:
+                    val_total_loss = val_physics_loss
+                ood_corner_losses['total'].append(val_total_loss.item() if torch.is_tensor(val_total_loss) else val_total_loss)
+
+            avg_ood_corner_residual = np.mean(ood_corner_losses['residual'])
+            avg_ood_corner_total = np.mean(ood_corner_losses['total'])
+            avg_ood_corner_data = np.mean(ood_corner_losses['data']) if 'data' in ood_corner_losses and len(ood_corner_losses['data']) > 0 else 0.0
+            avg_ood_corner_deriv = np.mean(ood_corner_losses['deriv']) if 'deriv' in ood_corner_losses and len(ood_corner_losses['deriv']) > 0 else 0.0
+            time_taken_ood_corner = time.time() - time_start_ood_corner
+
+            print(f"  [ood_corner] loss = {avg_ood_corner_total:.6e}")
+            if getattr(params, 'use_wandb', True):
+                wandb.log({
+                    "val_ood_corner/pde_loss": avg_ood_corner_residual,
+                    **({"val_ood_corner/data_loss": avg_ood_corner_data} if getattr(params, 'hybrid_training', False) else {}),
+                    **({"val_ood_corner/deriv_loss": avg_ood_corner_deriv} if getattr(params, 'use_deriv_loss', False) else {}),
+                    "val_ood_corner/total_loss": avg_ood_corner_total,
+                })
+            time_analysis_dict[ep]["ood_corner_val_sum"] = time_taken_ood_corner
+        else:
+            time_analysis_dict[ep]["ood_corner_val_sum"] = 0.0
+
         # Periodically save model weights
         save_weights_every = getattr(params, "save_weights_every", None)
         save_weights = getattr(params, "save_weights", False)
@@ -1027,6 +1244,7 @@ def trainer(
         "loss_residual_d2psi", "loss_residual_fd", "loss_residual_norm",
         # Inter-batch and post-loop overhead
         "bookkeeping", "dataloader", "postloop_misc", "postloop_val",
+        "ood_single_val", "ood_corner_val",
     ]
     ta_summary = {
         "n_params": n_params,

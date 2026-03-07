@@ -8,11 +8,12 @@ base_config: &BASE_CONFIG
     ## parameters
   random_seed: 42
 
-  run_name: "fixweights_norestarts_5000ep_4th_inp_detach_logx_gpu_best_1e-6_model"
-  wandb_notes: ""
+  run_name: "clip5_cosine_dec_1000ep_min1000extra"
+  wandb_notes: "mega data change, extended range. \
+    Using best model from 1e-6 clamp, with log x as detached 4th input"
 ## wandb parameters
   use_wandb: True  # Set False to disable all wandb logging
-  wandb_group: "week23feb"
+  wandb_group: "week02mar"
   wandb_project: "mini_pinn"
   wandb_entity: "guzelmen_msci_project"
 
@@ -58,11 +59,11 @@ base_config: &BASE_CONFIG
   end_lr: 1e-3
   lr_warmup_epochs: 200
   min_lr: 5e-5  # Minimum LR at the bottom of every cosine cycle
-  cosine_restart_period: 8000  # Epochs per cycle for cosine_restarts / cosine_decaying_restarts
+  cosine_restart_period: 800  # Epochs per cycle for cosine_restarts / cosine_decaying_restarts
   restart_decay_factor: 0.6   # Geometric decay of peak LR per cycle (cosine_decaying_restarts only)
-  # cosine_decay_epochs: 2000  # Fixed cosine decay period (omit to use total_epochs - warmup)
+  cosine_decay_epochs: 800  # Fixed cosine decay period (omit to use total_epochs - warmup)
   grad_clipping: True  # Clips to clip_value
-  clip_value: 100.0
+  clip_value: 5.0
 
   ## loss parameters
   loss_type: "mse"
@@ -82,11 +83,11 @@ base_config: &BASE_CONFIG
   use_solver_data: True  # If True, load data in {inputs, targets} format
   data_loss_type: "rel_l2"  # options: "mse", "rel_l2"
   hybrid_weight_strategy: "fixed"  # "fixed" or "adaptive" (adaptive overrides schedule below)
-  hybrid_weight_schedule: "fixed"  # "fixed", "step", or "cosine"
+  hybrid_weight_schedule: "cosine"  # "fixed", "step", or "cosine"
   # Starting weights (epoch 0)
-  physics_loss_weight: 3.0
-  data_loss_weight: 3.0
-  deriv_loss_weight: 3.0
+  physics_loss_weight: 1.0
+  data_loss_weight: 5.0
+  deriv_loss_weight: 5.0
   # Final weights (last epoch) — cosine interpolation between start and end
   physics_loss_weight_final: 5.0
   data_loss_weight_final: 2.0
@@ -97,22 +98,33 @@ base_config: &BASE_CONFIG
   use_deriv_loss: True        # If True, add dψ/dx matching loss from solver data
 
   ## data parameters
-  data_path: "data/phase_4_solver_doubletargets_smallrange.pt"
+  data_path: "data/phase_4_solver_extended_coarse.pt"
   filter_x_min: True          # If True, remove data points with x < x_min_threshold before splitting
   x_min_threshold: 1e-6       # Minimum x value to keep (points below are removed)
+
+  ## extended loader (new two-file parameter-space split)
+  use_extended_loader: True
+  fine_data_path: "data/phase_4_solver_extended_fine.pt"
+  alpha_lo_pct: 10
+  alpha_hi_pct: 5
+  T_lo_pct: 5
+  T_hi_pct: 5
+  interp_val_n_samples: 50000
+  ood_eval_interval: 50
+
   batch_size: 2048
   shuffle_train: True
   use_sqrtx: False
 
   ## training parameters
   stage: "train"
-  epochs: 5000
+  epochs: 2000
 
   # saving
   save_preds: False
   save_every: 100
   plot_auto: False
   save_weights: True
-  save_weights_every: 500
+  save_weights_every: 100
   pred_dir: "predictions"
   plot_dir: "plot_predictions"

@@ -7,9 +7,9 @@ from typing import Tuple
 
 import torch
 
-from . import models
-from .YParams import YParams
-from .utils import PROJECT_ROOT
+from .. import models
+from ..YParams import YParams
+from ..utils import PROJECT_ROOT
 
 
 def build_model_from_params(params) -> torch.nn.Module:

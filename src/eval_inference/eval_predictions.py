@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 import pickle
 import math
 from scipy.optimize import curve_fit
-from .utils import PROJECT_ROOT
+from ..utils import PROJECT_ROOT
 
 
 def plot_pred_phase1(filepath, params):

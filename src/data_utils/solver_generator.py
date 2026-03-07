@@ -87,8 +87,8 @@ def generate_phase4_solver(
     out_path=None,
     seed=42,
     n_x=300,
-    n_alpha=40,
-    n_T=60,
+    n_alpha=80,
+    n_T=100,
     tol=1e-5,
     max_nodes=int(2e5)
 ):
@@ -117,15 +117,15 @@ def generate_phase4_solver(
     """
     if out_path is None:
         from ..utils import PROJECT_ROOT
-        out_path = PROJECT_ROOT / "data/phase_4_solver_extended_coarse.pt"
+        out_path = PROJECT_ROOT / "data/phase_4_solver_extended_fine.pt"
     
     np.random.seed(seed)
 
     # Initialize wandb
     wandb.login()
     wandb.init(
-        name="phase_4_solver_extended_coarse",
-        notes=f"Alpha ~1-10 (r0 from 5e-11 to 4.8e-10 m) - {n_alpha} vals, T 0.01-10 keV - {n_T} vals, x ~0-1 - {n_x} vals, tol={tol}. Coarse coverage. \
+        name="phase_4_solver_extended_fine",
+        notes=f"Alpha ~1-10 (r0 from 5e-11 to 4.8e-10 m) - {n_alpha} vals, T 0.01-10 keV - {n_T} vals, x ~0-1 - {n_x} vals, tol={tol}. Fine coverage. \
         Using previous solutions for initial guess. Max nodes={max_nodes}. Now targets are psi and dpsi/dx, used for auxiliary data loss function in training.",
         group="week02mar",
         project="data_generation",

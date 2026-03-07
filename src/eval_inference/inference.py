@@ -15,7 +15,7 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 
-from .utils import PROJECT_ROOT
+from ..utils import PROJECT_ROOT
 from .infer_model import load_model_from_config_and_state
 
 
