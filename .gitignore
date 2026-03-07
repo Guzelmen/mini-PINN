@@ -26,6 +26,6 @@ gene_TF_plots/
 literature/
 saving_weights/
 time_analysis/
-src/eval_inference/
+
 src/analyse_data/
 src/yamls/temp/
