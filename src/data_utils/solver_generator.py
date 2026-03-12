@@ -87,22 +87,24 @@ def generate_phase4_solver(
     out_path=None,
     seed=42,
     n_x=300,
-    n_alpha=80,
-    n_T=100,
+    n_alpha=199,
+    n_T=200,
     tol=1e-5,
-    max_nodes=int(2e5)
+    max_nodes=int(2e5),
+    part=None,
+    n_parts=4,
 ):
     """
     Generate Phase 4 dataset using the numerical solver.
-    
+
     Uses same ranges as generate_phase4_small:
         - x: from solver's natural grid (maps to ~[0, 1])
         - alpha: ~1-5 (r0 from 5e-11 to 2.5e-10 m)
         - T: 1-10 keV
-        
+
     Saves dict with 'inputs' [x, alpha, T] and 'targets' [psi].
     Logs to wandb to check progress.
-    
+
     Args:
         out_path: where to save the .pt file (default: data/phase_4_solver.pt)
         seed: random seed (not used for solver, but for consistency)
@@ -111,42 +113,65 @@ def generate_phase4_solver(
         n_T: number of temperature values
         tol: solver tolerance
         max_nodes: maximum number of mesh nodes for solve_bvp (default: 2e5)
+        part: if given (1-indexed), only generate 1/n_parts of the T range.
+              The full T array is computed first and then sliced so point
+              values are identical to a full run.  None = full run (default).
+        n_parts: how many parts the T range is divided into (default: 4)
     Returns:
         inputs: torch tensor of shape [N, 3] with columns [x, alpha, T]
         targets: torch tensor of shape [N, 2] with psi  and dpsi/dx values
     """
     if out_path is None:
         from ..utils import PROJECT_ROOT
-        out_path = PROJECT_ROOT / "data/phase_4_solver_extended_fine.pt"
+        if part is not None:
+            out_path = PROJECT_ROOT / f"data/phase_4_solver_mega_fine_part{part}.pt"
+        else:
+            out_path = PROJECT_ROOT / "data/phase_4_solver_mega_fine.pt"
     
     np.random.seed(seed)
 
     # Initialize wandb
+    part_suffix = f"_part{part}of{n_parts}" if part is not None else ""
     wandb.login()
     wandb.init(
-        name="phase_4_solver_extended_fine",
-        notes=f"Alpha ~1-10 (r0 from 5e-11 to 4.8e-10 m) - {n_alpha} vals, T 0.01-10 keV - {n_T} vals, x ~0-1 - {n_x} vals, tol={tol}. Fine coverage. \
-        Using previous solutions for initial guess. Max nodes={max_nodes}. Now targets are psi and dpsi/dx, used for auxiliary data loss function in training.",
+        name=f"phase_4_solver_mega_fine{part_suffix}",
+        notes=f"Alpha ~2-22 (r0 from 1e-10 to 1e-9 m) - {n_alpha} vals, T 0.0001-10 keV - {n_T} vals, x ~0-1 - {n_x} vals, tol={tol}. Fine coverage. \
+        Using previous solutions for initial guess. Max nodes={max_nodes}. Now targets are psi and dpsi/dx, used for auxiliary data loss function in training."
+        + (f" Part {part}/{n_parts} of T range." if part is not None else ""),
         group="week02mar",
         project="data_generation",
         entity="guzelmen_msci_project",
     )
     
-    # alpha range (r0 from 5e-11 to 4.8e-10 m -> alpha ~ 1 to 10)
-    r0_vals = np.logspace(np.log10(5e-11), np.log10(4.8e-10), n_alpha)
-    alpha_vals = r0_vals / B_M
+    # alpha range (r0 from ~1e-10 to ~1e-9 m -> alpha ~ 2 to 22)
+    # r0_vals = np.logspace(np.log10(1.023e-10), np.log10(1.023e-9), n_alpha)
+    # alpha_vals = r0_vals / B_M
+
+    # new version
+    alpha_vals = np.linspace(0.5, 50, n_alpha)
+    r0_vals = alpha_vals * B_M
     
-    # T: narrow range 1 to 10 keV
-    T_vals = np.logspace(np.log10(0.01), np.log10(10.0), n_T)
-    
+    # T range 0.1 ev - 10 keV
+    T_vals = np.logspace(np.log10(0.0001), np.log10(10.0), n_T)
+
+    # If running as a sub-part, slice the precomputed T array so that the
+    # values are identical to what a full run would produce at those indices.
+    if part is not None:
+        assert n_T % n_parts == 0, f"n_T={n_T} must be divisible by n_parts={n_parts}"
+        chunk = n_T // n_parts
+        t_start = (part - 1) * chunk
+        t_end = part * chunk
+        T_vals = T_vals[t_start:t_end]
+
     data = []
     failed = 0
     completed = 0
     
-    total = n_alpha * n_T
-    print(f"Generating solutions for {n_alpha} alpha × {n_T} T = {total} (α, T) pairs...")
+    total = n_alpha * len(T_vals)
+    part_info = f" (part {part}/{n_parts})" if part is not None else ""
+    print(f"Generating solutions for {n_alpha} alpha × {len(T_vals)} T = {total} (α, T) pairs{part_info}...")
     print(f"  alpha range: [{alpha_vals.min():.3f}, {alpha_vals.max():.3f}]")
-    print(f"  T range: [{T_vals.min():.3f}, {T_vals.max():.3f}] keV")
+    print(f"  T range: [{T_vals.min():.6f}, {T_vals.max():.6f}] keV")
     
     wandb.log({"total_solves_to_do": n_alpha * n_T})
     
@@ -212,4 +237,15 @@ def generate_phase4_solver(
 
 
 if __name__ == "__main__":
-    generate_phase4_solver()
+    import argparse
+    parser = argparse.ArgumentParser(description="Generate Phase 4 solver data")
+    parser.add_argument(
+        "--part", type=int, default=None,
+        help="Which part to generate (1-indexed). Omit to run the full dataset."
+    )
+    parser.add_argument(
+        "--n-parts", type=int, default=4,
+        help="Total number of parts the T range is divided into (default: 4)"
+    )
+    args = parser.parse_args()
+    generate_phase4_solver(part=args.part, n_parts=args.n_parts)
