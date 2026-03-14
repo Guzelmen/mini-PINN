@@ -438,44 +438,62 @@ def trainer(
 
             if ep % params.save_every == 0:
                 # Detach tensors before saving to avoid gradient tracking issues
-                d2outdx2 = sec_deriv_auto(outputs, inputs)
-                factor = (x**0.5)/(alpha**(1.5))
-                d2check = (d2outdx2 * factor)**(2/3)
-                epoch_x.append(x.detach())
-                epoch_alpha.append(alpha.detach())
-                if params.phase == 4:
-                    epoch_T.append(T.detach())
-                epoch_outputs.append(outputs.detach())
-                epoch_d2check.append(d2check.detach())
+                # Skip sec_deriv_auto when physics weight is 0 (no residual computed)
+                if hasattr(weighter, 'physics_weight') and weighter.physics_weight == 0.0:
+                    epoch_x.append(x.detach())
+                    epoch_alpha.append(alpha.detach())
+                    if params.phase == 4:
+                        epoch_T.append(T.detach())
+                    epoch_outputs.append(outputs.detach())
+                    epoch_d2check.append(torch.zeros_like(outputs.detach()))
+                else:
+                    d2outdx2 = sec_deriv_auto(outputs, inputs)
+                    factor = (x**0.5)/(alpha**(1.5))
+                    d2check = (d2outdx2 * factor)**(2/3)
+                    epoch_x.append(x.detach())
+                    epoch_alpha.append(alpha.detach())
+                    if params.phase == 4:
+                        epoch_T.append(T.detach())
+                    epoch_outputs.append(outputs.detach())
+                    epoch_d2check.append(d2check.detach())
 
             t_ta_loss = time.time()
 
             # --- Residual loss ---
             t_loss_residual_start = time.time()
-            if params.phase == 3:
-                residual_name = f"compute_residual_loss_phase2"
-            elif params.phase == 4:
-                residual_name = f"compute_residual_loss_phase4"
-            else:
-                residual_name = f"compute_residual_loss_phase{params.phase}"
-            residual_fn = getattr(losses, residual_name)
-            # Pass timing_dict for residual internals profiling (phase 4 only)
-            residual_timing = {}
-            if params.phase == 4:
-                residual_loss = residual_fn(outputs, inputs, params=params, timing_dict=residual_timing)
-            else:
-                residual_loss = residual_fn(outputs, inputs, params=params)
-
-            # Optional FMT helper loss (diff training mode)
-            if getattr(params, "fmt_help", False):
-                fmt_loss = losses.compute_fmt_loss_phase2(model, inputs, outputs, params)
-            else:
+            # Skip expensive double-autograd residual when physics weight is 0
+            skip_physics = (hasattr(weighter, 'physics_weight') and weighter.physics_weight == 0.0)
+            if skip_physics:
+                residual_loss = torch.tensor(0.0, device=outputs.device)
                 fmt_loss = torch.tensor(0.0, device=outputs.device)
+            else:
+                if params.phase == 3:
+                    residual_name = f"compute_residual_loss_phase2"
+                elif params.phase == 4:
+                    residual_name = f"compute_residual_loss_phase4"
+                else:
+                    residual_name = f"compute_residual_loss_phase{params.phase}"
+                residual_fn = getattr(losses, residual_name)
+                # Pass timing_dict for residual internals profiling (phase 4 only)
+                residual_timing = {}
+                if params.phase == 4:
+                    residual_loss = residual_fn(outputs, inputs, params=params, timing_dict=residual_timing)
+                else:
+                    residual_loss = residual_fn(outputs, inputs, params=params)
+
+                # Optional FMT helper loss (diff training mode)
+                if getattr(params, "fmt_help", False):
+                    fmt_loss = losses.compute_fmt_loss_phase2(model, inputs, outputs, params)
+                else:
+                    fmt_loss = torch.tensor(0.0, device=outputs.device)
             t_loss_residual_end = time.time()
 
             # --- BC losses ---
             t_loss_bc_start = time.time()
-            if params.mode == "soft":
+            if skip_physics:
+                bc_1_loss = torch.tensor(0.0, device=outputs.device)
+                bc_2_loss = torch.tensor(0.0, device=outputs.device)
+            elif params.mode == "soft":
                 # Phase 4 reuses phase 1 BC functions (BCs are T-independent)
                 if params.phase == 4:
                     bc1name = f"compute_bc_loss_1_phase4"
@@ -754,9 +772,25 @@ def trainer(
         if weighter.hybrid_training and weighter.hybrid_weight_schedule == 'cosine':
             t = ep / max(epochs - 1, 1)
             cosine_factor = 0.5 * (1.0 - math.cos(math.pi * t))
-            weighter.physics_weight = (weighter.physics_weight_initial
-                                       + (weighter.physics_weight_final - weighter.physics_weight_initial)
-                                       * cosine_factor)
+
+            # Physics weight: delayed cosine or normal cosine
+            if weighter.physics_weight_delayed_cosine:
+                delay = weighter.physics_weight_delay_epochs
+                if ep < delay:
+                    weighter.physics_weight = weighter.physics_weight_initial
+                else:
+                    remaining = max(epochs - 1 - delay, 1)
+                    t_phys = (ep - delay) / remaining
+                    phys_cosine = 0.5 * (1.0 - math.cos(math.pi * t_phys))
+                    weighter.physics_weight = (weighter.physics_weight_initial
+                                               + (weighter.physics_weight_final - weighter.physics_weight_initial)
+                                               * phys_cosine)
+            else:
+                weighter.physics_weight = (weighter.physics_weight_initial
+                                           + (weighter.physics_weight_final - weighter.physics_weight_initial)
+                                           * cosine_factor)
+
+            # Data and deriv weights: always use normal full-range cosine
             weighter.data_weight = (weighter.data_weight_initial
                                     + (weighter.data_weight_final - weighter.data_weight_initial)
                                     * cosine_factor)

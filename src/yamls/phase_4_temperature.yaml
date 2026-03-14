@@ -8,12 +8,12 @@ base_config: &BASE_CONFIG
     ## parameters
   random_seed: 42
 
-  run_name: "biggerdataweight_clip5_cosine_dec_1000ep_min1000extra"
-  wandb_notes: "mega data change, extended range. \
+  run_name: "MEGADATA_startphys0_clip5_cosine_dec_1000ep_min1000extra"
+  wandb_notes: "mega data change, even more mega data range. \
     Using best model from 1e-6 clamp, with log x as detached 4th input"
 ## wandb parameters
   use_wandb: True  # Set False to disable all wandb logging
-  wandb_group: "week02mar"
+  wandb_group: "week09mar"
   wandb_project: "mini_pinn"
   wandb_entity: "guzelmen_msci_project"
 
@@ -85,30 +85,35 @@ base_config: &BASE_CONFIG
   hybrid_weight_strategy: "fixed"  # "fixed" or "adaptive" (adaptive overrides schedule below)
   hybrid_weight_schedule: "cosine"  # "fixed", "step", or "cosine"
   # Starting weights (epoch 0)
-  physics_loss_weight: 1.0
-  data_loss_weight: 5.0
+  physics_loss_weight: 0.0
+  data_loss_weight: 10.0
   deriv_loss_weight: 5.0
   # Final weights (last epoch) — cosine interpolation between start and end
-  physics_loss_weight_final: 4.0
-  data_loss_weight_final: 4.0
+  physics_loss_weight_final: 5.0
+  data_loss_weight_final: 5.0
   deriv_loss_weight_final: 2.0
   data_loss_step_epochs: 500  # Only used when hybrid_weight_schedule: "step"
+  # Delayed cosine schedule for physics weight only:
+  # Hold physics weight fixed for `physics_weight_delay_epochs`, then cosine from start to final over remaining epochs.
+  # Data and deriv weights still use the normal full-range cosine schedule.
+  physics_weight_delayed_cosine: True  # Set True to enable
+  physics_weight_delay_epochs: 500      # Number of epochs to hold physics_loss_weight fixed before cosine begins
 
   ## derivative target loss
   use_deriv_loss: True        # If True, add dψ/dx matching loss from solver data
 
   ## data parameters
-  data_path: "data/phase_4_solver_extended_coarse.pt"
+  data_path: "data/phase_4_solver_mega_coarse.pt"
   filter_x_min: True          # If True, remove data points with x < x_min_threshold before splitting
   x_min_threshold: 1e-6       # Minimum x value to keep (points below are removed)
 
   ## extended loader (new two-file parameter-space split)
   use_extended_loader: True
-  fine_data_path: "data/phase_4_solver_extended_fine.pt"
-  alpha_lo_pct: 10
-  alpha_hi_pct: 5
-  T_lo_pct: 5
-  T_hi_pct: 5
+  fine_data_path: "data/phase_4_solver_mega_fine.pt"
+  alpha_lo_pct: 1
+  alpha_hi_pct: 1
+  T_lo_pct: 1
+  T_hi_pct: 1
   interp_val_n_samples: 50000
   ood_eval_interval: 50
 
