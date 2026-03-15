@@ -55,14 +55,14 @@ base_config: &BASE_CONFIG
   x_log_std: 1.0             # Will be computed from train data
 
   ## optimizer parameters
-  lr_type: "cosine" # constant, linear, cosine, cosine_restarts, cosine_decaying_restarts
+  lr_type: "cosine_decaying_restarts" # constant, linear, cosine, cosine_restarts, cosine_decaying_restarts
   constant_lr: 1e-4
   start_lr: 1e-5
   end_lr: 1e-3
-  lr_warmup_epochs: 200
+  lr_warmup_epochs: 50
   min_lr: 5e-5  # Minimum LR at the bottom of every cosine cycle
-  cosine_restart_period: 800  # Epochs per cycle for cosine_restarts / cosine_decaying_restarts
-  restart_decay_factor: 0.6   # Geometric decay of peak LR per cycle (cosine_decaying_restarts only)
+  cosine_restart_period: 500  # Epochs per cycle for cosine_restarts / cosine_decaying_restarts
+  restart_decay_factor: 0.7   # Geometric decay of peak LR per cycle (cosine_decaying_restarts only)
   cosine_decay_epochs: 800  # Fixed cosine decay period (omit to use total_epochs - warmup)
   grad_clipping: True  # Clips to clip_value
   clip_value: 1.0
@@ -70,8 +70,8 @@ base_config: &BASE_CONFIG
   # Extra min-LR tail: run the chosen schedule for (epochs - extra_epoch_amount)
   # epochs, then hold at min_lr for the remaining extra_epoch_amount epochs.
   # Overrides cosine_decay_epochs when lr_type is cosine.
-  add_extra_minlr_epochs: False
-  extra_epoch_amount: 0
+  add_extra_minlr_epochs: True
+  extra_epoch_amount: 500
 
   ## loss parameters
   loss_type: "mse"
@@ -94,23 +94,23 @@ base_config: &BASE_CONFIG
   hybrid_weight_schedule: "cosine"  # "fixed", "step", or "cosine"
   # Starting weights (epoch 0)
   physics_loss_weight: 0.0
-  data_loss_weight: 10.0
-  deriv_loss_weight: 5.0
+  data_loss_weight: 5.0
+  deriv_loss_weight: 0.0
   # Final weights (last epoch) — cosine interpolation between start and end
-  physics_loss_weight_final: 10.0
-  data_loss_weight_final: 5.0
+  physics_loss_weight_final: 3.0
+  data_loss_weight_final: 2.0
   deriv_loss_weight_final: 2.0
   data_loss_step_epochs: 500  # Only used when hybrid_weight_schedule: "step"
   # Delayed cosine schedule for physics weight only:
   # Hold physics weight fixed for `physics_weight_delay_epochs`, then cosine from start to final over remaining epochs.
   # Data weight still uses the normal full-range cosine schedule.
   physics_weight_delayed_cosine: True  # Set True to enable
-  physics_weight_delay_epochs: 500      # Number of epochs to hold physics_loss_weight fixed before cosine begins
+  physics_weight_delay_epochs: 1000      # Number of epochs to hold physics_loss_weight fixed before cosine begins
   # Delayed cosine schedule for deriv weight only:
   # Hold deriv weight fixed for `deriv_weight_delay_epochs`, then cosine from start to final over remaining epochs.
   # Set False to revert to normal full-range cosine schedule.
-  deriv_weight_delayed_cosine: False  # Set True to enable
-  deriv_weight_delay_epochs: 0        # Number of epochs to hold deriv_loss_weight fixed before cosine begins
+  deriv_weight_delayed_cosine: True  # Set True to enable
+  deriv_weight_delay_epochs: 500       # Number of epochs to hold deriv_loss_weight fixed before cosine begins
 
   ## derivative target loss
   use_deriv_loss: True        # If True, add dψ/dx matching loss from solver data
@@ -130,13 +130,13 @@ base_config: &BASE_CONFIG
   interp_val_n_samples: 50000
   ood_eval_interval: 50
 
-  batch_size: 2048
+  batch_size: 16384
   shuffle_train: True
   use_sqrtx: False
 
   ## training parameters
   stage: "train"
-  epochs: 2000
+  epochs: 2050
 
   # saving
   save_preds: False
