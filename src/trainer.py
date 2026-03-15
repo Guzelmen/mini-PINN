@@ -463,6 +463,7 @@ def trainer(
             t_loss_residual_start = time.time()
             # Skip expensive double-autograd residual when physics weight is 0
             skip_physics = (hasattr(weighter, 'physics_weight') and weighter.physics_weight == 0.0)
+            residual_timing = {}
             if skip_physics:
                 residual_loss = torch.tensor(0.0, device=outputs.device)
                 fmt_loss = torch.tensor(0.0, device=outputs.device)
@@ -474,8 +475,6 @@ def trainer(
                 else:
                     residual_name = f"compute_residual_loss_phase{params.phase}"
                 residual_fn = getattr(losses, residual_name)
-                # Pass timing_dict for residual internals profiling (phase 4 only)
-                residual_timing = {}
                 if params.phase == 4:
                     residual_loss = residual_fn(outputs, inputs, params=params, timing_dict=residual_timing)
                 else:
@@ -534,7 +533,8 @@ def trainer(
 
             # --- Derivative loss ---
             t_loss_deriv_start = time.time()
-            if use_deriv_loss and targets is not None:
+            skip_deriv = (weighter.deriv_weight == 0.0)
+            if use_deriv_loss and targets is not None and not skip_deriv:
                 if targets.shape[1] >= 2:
                     deriv_targets_batch = targets[:, 1:2]
                     deriv_loss = losses.compute_deriv_loss_phase4(outputs, inputs, deriv_targets_batch, params, val_stage=False)
@@ -795,9 +795,21 @@ def trainer(
                                     + (weighter.data_weight_final - weighter.data_weight_initial)
                                     * cosine_factor)
             if weighter.use_deriv_loss:
-                weighter.deriv_weight = (weighter.deriv_weight_initial
-                                         + (weighter.deriv_weight_final - weighter.deriv_weight_initial)
-                                         * cosine_factor)
+                if weighter.deriv_weight_delayed_cosine:
+                    delay = weighter.deriv_weight_delay_epochs
+                    if ep < delay:
+                        weighter.deriv_weight = weighter.deriv_weight_initial
+                    else:
+                        remaining = max(epochs - 1 - delay, 1)
+                        t_deriv = (ep - delay) / remaining
+                        deriv_cosine = 0.5 * (1.0 - math.cos(math.pi * t_deriv))
+                        weighter.deriv_weight = (weighter.deriv_weight_initial
+                                                 + (weighter.deriv_weight_final - weighter.deriv_weight_initial)
+                                                 * deriv_cosine)
+                else:
+                    weighter.deriv_weight = (weighter.deriv_weight_initial
+                                             + (weighter.deriv_weight_final - weighter.deriv_weight_initial)
+                                             * cosine_factor)
 
         # Update scheduler AFTER all batches (PyTorch best practice)
         scheduler.step()

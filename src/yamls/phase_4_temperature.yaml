@@ -8,7 +8,7 @@ base_config: &BASE_CONFIG
     ## parameters
   random_seed: 42
 
-  run_name: "MEGADATA_startphys0_clip5_cosine_dec_1000ep_min1000extra"
+  run_name: "MEGADATA_LOGX_dataw10_startphys0_clip1_cosine_dec_1000ep_min1000extra"
   wandb_notes: "mega data change, even more mega data range. \
     Using best model from 1e-6 clamp, with log x as detached 4th input"
 ## wandb parameters
@@ -48,9 +48,10 @@ base_config: &BASE_CONFIG
   T_std: 1.0
 
   ## normalisation (x)
-  use_log_x: True
-  x_log_mean: 0.0   # Will be computed from train data
-  x_log_std: 1.0    # Will be computed from train data
+  use_log_x: True           # If True, use log(x) as detached 4th input (original)
+  use_log_lam_x: False       # If True, use log(λx) as detached 4th input (new)
+  x_log_mean: 0.0            # Will be computed from train data (used by whichever is active)
+  x_log_std: 1.0             # Will be computed from train data
 
   ## optimizer parameters
   lr_type: "cosine" # constant, linear, cosine, cosine_restarts, cosine_decaying_restarts
@@ -63,7 +64,7 @@ base_config: &BASE_CONFIG
   restart_decay_factor: 0.6   # Geometric decay of peak LR per cycle (cosine_decaying_restarts only)
   cosine_decay_epochs: 800  # Fixed cosine decay period (omit to use total_epochs - warmup)
   grad_clipping: True  # Clips to clip_value
-  clip_value: 5.0
+  clip_value: 1.0
 
   ## loss parameters
   loss_type: "mse"
@@ -89,15 +90,20 @@ base_config: &BASE_CONFIG
   data_loss_weight: 10.0
   deriv_loss_weight: 5.0
   # Final weights (last epoch) — cosine interpolation between start and end
-  physics_loss_weight_final: 5.0
+  physics_loss_weight_final: 10.0
   data_loss_weight_final: 5.0
   deriv_loss_weight_final: 2.0
   data_loss_step_epochs: 500  # Only used when hybrid_weight_schedule: "step"
   # Delayed cosine schedule for physics weight only:
   # Hold physics weight fixed for `physics_weight_delay_epochs`, then cosine from start to final over remaining epochs.
-  # Data and deriv weights still use the normal full-range cosine schedule.
+  # Data weight still uses the normal full-range cosine schedule.
   physics_weight_delayed_cosine: True  # Set True to enable
   physics_weight_delay_epochs: 500      # Number of epochs to hold physics_loss_weight fixed before cosine begins
+  # Delayed cosine schedule for deriv weight only:
+  # Hold deriv weight fixed for `deriv_weight_delay_epochs`, then cosine from start to final over remaining epochs.
+  # Set False to revert to normal full-range cosine schedule.
+  deriv_weight_delayed_cosine: False  # Set True to enable
+  deriv_weight_delay_epochs: 0        # Number of epochs to hold deriv_loss_weight fixed before cosine begins
 
   ## derivative target loss
   use_deriv_loss: True        # If True, add dψ/dx matching loss from solver data

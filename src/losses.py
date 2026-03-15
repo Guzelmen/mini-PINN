@@ -846,6 +846,9 @@ class LossWeighter_phase4:
         # Delayed cosine for physics weight only
         self.physics_weight_delayed_cosine = getattr(params, 'physics_weight_delayed_cosine', False)
         self.physics_weight_delay_epochs = getattr(params, 'physics_weight_delay_epochs', 0)
+        # Delayed cosine for deriv weight only
+        self.deriv_weight_delayed_cosine = getattr(params, 'deriv_weight_delayed_cosine', False)
+        self.deriv_weight_delay_epochs = getattr(params, 'deriv_weight_delay_epochs', 0)
         # Snapshots of initial weights (immutable reference points for cosine interpolation)
         self.physics_weight_initial = self.physics_weight
         self.data_weight_initial = self.data_weight

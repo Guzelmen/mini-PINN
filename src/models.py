@@ -475,10 +475,16 @@ class Model_hard_phase4(nn.Module):
         self.k_val = params.k_val
         self.add_phi0 = params.add_phi0
         self.use_log_x = getattr(params, "use_log_x", False)
+        self.use_log_lam_x = getattr(params, "use_log_lam_x", False)
         self.use_sqrtx = getattr(params, "use_sqrtx", False)
+
+        if self.use_log_x and self.use_log_lam_x:
+            raise ValueError("use_log_x and use_log_lam_x are mutually exclusive. Set only one to True.")
 
         in_dim = params.inp_dim
         if self.use_log_x:
+            in_dim = in_dim + 1
+        if self.use_log_lam_x:
             in_dim = in_dim + 1
         if self.use_sqrtx:
             in_dim = in_dim + 1
@@ -543,7 +549,7 @@ class Model_hard_phase4(nn.Module):
 
         
         
-        if self.use_log_x:
+        if self.use_log_x or self.use_log_lam_x:
             if norm_mode == "standardize":
                 x_mean_val = getattr(params, "x_log_mean", 0.0)
                 x_std_val = getattr(params, "x_log_std", 1.0)
@@ -597,7 +603,21 @@ class Model_hard_phase4(nn.Module):
         else:
             normalised = log_x
             print("Warning: incorrect norm_mode")
-        
+
+        return normalised
+
+    def scale_lam_x(self, x, alpha, T_kV):
+        """Compute log(λx) and standardize. All inputs should be detached."""
+        from .fd_integrals import B_M, C0_M
+        lam = alpha * B_M * (T_kV ** 0.25) / C0_M
+        log_lam_x = torch.log(lam * x + 1e-12)
+        if self.norm_mode == "standardize":
+            normalised = (log_lam_x - self.x_log_mean) / (self.x_log_std + 1e-8)
+        elif self.norm_mode == "minmax":
+            x_mm = (log_lam_x - self.x_min) / (self.x_max - self.x_min + 1e-12)
+            normalised = 2.0 * x_mm - 1.0
+        else:
+            normalised = log_lam_x
         return normalised
 
     def forward(self, inputs):
@@ -619,6 +639,9 @@ class Model_hard_phase4(nn.Module):
         if self.use_log_x:
             log_x_feat = self.scale_x(x.detach())
             network_inp = torch.cat([x, norm_alpha, norm_T, log_x_feat], dim=-1)
+        elif self.use_log_lam_x:
+            log_lam_x_feat = self.scale_lam_x(x.detach(), alpha.detach(), T_kV.detach())
+            network_inp = torch.cat([x, norm_alpha, norm_T, log_lam_x_feat], dim=-1)
         elif self.use_sqrtx:
             sqrt_x = torch.sqrt(x)
             network_inp = torch.cat([x, norm_alpha, norm_T, sqrt_x], dim=-1)
@@ -628,7 +651,10 @@ class Model_hard_phase4(nn.Module):
         if self.debug_mode:
             # Debug: check raw vs normalized statistics
             print(f"[Phase4 fwd] x: min={x.min().item():.6g}, max={x.max().item():.6g}")
-            print(f"[Phase4 fwd] log_x_feat: min={log_x_feat.min().item():.6g}, max={log_x_feat.max().item():.6g}")
+            if self.use_log_x:
+                print(f"[Phase4 fwd] log_x_feat: min={log_x_feat.min().item():.6g}, max={log_x_feat.max().item():.6g}")
+            elif self.use_log_lam_x:
+                print(f"[Phase4 fwd] log_lam_x_feat: min={log_lam_x_feat.min().item():.6g}, max={log_lam_x_feat.max().item():.6g}")
             print(f"[Phase4 fwd] alpha: mean={alpha.mean().item():.6g}, std={alpha.std().item():.6g}")
             print(f"[Phase4 fwd] norm_alpha: mean={norm_alpha.mean().item():.6g}, std={norm_alpha.std().item():.6g}")
             print(f"[Phase4 fwd] T_kV: mean={T_kV.mean().item():.6g}, std={T_kV.std().item():.6g}")

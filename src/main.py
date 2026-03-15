@@ -50,6 +50,9 @@ def run_training(params):
     else:
         print("wandb disabled (use_wandb=False). Skipping wandb logging.")
 
+    if getattr(params, 'use_log_x', False) and getattr(params, 'use_log_lam_x', False):
+        raise ValueError("use_log_x and use_log_lam_x are mutually exclusive. Set only one to True.")
+
     torch.manual_seed(params.random_seed)
     random.seed(params.random_seed)
     np.random.seed(params.random_seed)
@@ -69,6 +72,9 @@ def run_training(params):
         params.T_mean        = ns['T_mean']
         params.T_std         = ns['T_std']
         if getattr(params, 'use_log_x', False):
+            params.x_log_mean = ns['x_log_mean']
+            params.x_log_std  = ns['x_log_std']
+        elif getattr(params, 'use_log_lam_x', False):
             params.x_log_mean = ns['x_log_mean']
             params.x_log_std  = ns['x_log_std']
 
@@ -159,6 +165,18 @@ def run_training(params):
                         params.x_log_mean = x_log_mean
                         params.x_log_std = x_log_std
                         print(f"[norm] Train standardize log(x): mean={x_log_mean:.6g}, std={x_log_std:.6g}")
+                    elif getattr(params, 'use_log_lam_x', False):
+                        from .fd_integrals import B_M, C0_M
+                        train_x     = X_train[:, 0:1]
+                        train_alpha = X_train[:, 1:2]
+                        train_T     = X_train[:, 2:3]
+                        train_lam   = train_alpha * B_M * (train_T ** 0.25) / C0_M
+                        train_log_lam_x = torch.log(train_lam * train_x + 1e-12)
+                        x_log_mean = float(train_log_lam_x.mean().item())
+                        x_log_std  = float(train_log_lam_x.std(unbiased=False).item())
+                        params.x_log_mean = x_log_mean
+                        params.x_log_std  = x_log_std
+                        print(f"[norm] Train standardize log(lam*x): mean={x_log_mean:.6g}, std={x_log_std:.6g}")
 
 
                 # Log diagnostics for val/test (raw and standardized with train stats)
@@ -212,6 +230,17 @@ def run_training(params):
                                 "norm/val_log_x_stdzd_mean": float(val_x_stdzd.mean().item()),
                                 "norm/val_log_x_stdzd_std": float(val_x_stdzd.std(unbiased=False).item()),
                             })
+                        elif getattr(params, 'use_log_lam_x', False):
+                            from .fd_integrals import B_M, C0_M
+                            val_lam = X_val[:, 1:2] * B_M * (X_val[:, 2:3] ** 0.25) / C0_M
+                            val_log_lam_x = torch.log(val_lam * X_val[:, 0:1] + 1e-12)
+                            val_lam_x_stdzd = (val_log_lam_x - x_log_mean) / (x_log_std + 1e-12)
+                            diag.update({
+                                "norm/val_log_lam_x_mean": float(val_log_lam_x.mean().item()),
+                                "norm/val_log_lam_x_std": float(val_log_lam_x.std(unbiased=False).item()),
+                                "norm/val_log_lam_x_stdzd_mean": float(val_lam_x_stdzd.mean().item()),
+                                "norm/val_log_lam_x_stdzd_std": float(val_lam_x_stdzd.std(unbiased=False).item()),
+                            })
 
                 if X_test is not None:
                     test_log_alpha = torch.log1p(X_test[:, 1:2])
@@ -256,6 +285,17 @@ def run_training(params):
                                 "norm/test_log_x_stdzd_mean": float(test_x_stdzd.mean().item()),
                                 "norm/test_log_x_stdzd_std": float(test_x_stdzd.std(unbiased=False).item()),
                             })
+                        elif getattr(params, 'use_log_lam_x', False):
+                            from .fd_integrals import B_M, C0_M
+                            test_lam = X_test[:, 1:2] * B_M * (X_test[:, 2:3] ** 0.25) / C0_M
+                            test_log_lam_x = torch.log(test_lam * X_test[:, 0:1] + 1e-12)
+                            test_lam_x_stdzd = (test_log_lam_x - x_log_mean) / (x_log_std + 1e-12)
+                            diag.update({
+                                "norm/test_log_lam_x_mean": float(test_log_lam_x.mean().item()),
+                                "norm/test_log_lam_x_std": float(test_log_lam_x.std(unbiased=False).item()),
+                                "norm/test_log_lam_x_stdzd_mean": float(test_lam_x_stdzd.mean().item()),
+                                "norm/test_log_lam_x_stdzd_std": float(test_lam_x_stdzd.std(unbiased=False).item()),
+                            })
 
                 # Ensure these derived params/diagnostics get into wandb (initial config update happened earlier)
                 try:
@@ -269,7 +309,7 @@ def run_training(params):
                     if int(params.phase) == 4:
                         wandb_update["T_mean"] = params.T_mean
                         wandb_update["T_std"] = params.T_std
-                        if getattr(params, 'use_log_x', False):
+                        if getattr(params, 'use_log_x', False) or getattr(params, 'use_log_lam_x', False):
                             wandb_update["x_log_mean"] = params.x_log_mean
                             wandb_update["x_log_std"] = params.x_log_std
                     if use_wandb:
