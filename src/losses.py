@@ -929,7 +929,21 @@ class LossWeighter_phase4:
         if self.use_deriv_loss and "deriv" in loss_dict:
             total = total + w_deriv * loss_dict["deriv"]
 
-        return total        
+        return total
+
+    def get_normalized_weights(self, loss_dict):
+        """Return normalized weights as a dict, matching get_weighted_loss logic."""
+        w_phys = self.physics_weight
+        w_data = self.data_weight if (self.hybrid_training and "data" in loss_dict) else 0.0
+        w_deriv = self.deriv_weight if (self.use_deriv_loss and "deriv" in loss_dict) else 0.0
+        
+        w_sum = w_phys + w_data + w_deriv
+        if w_sum > 0:
+            w_phys /= w_sum
+            w_data /= w_sum
+            w_deriv /= w_sum
+        
+        return {"physics": w_phys, "data": w_data, "deriv": w_deriv}        
 
 
 def compute_total_loss_phase4(loss_dict, weighter):

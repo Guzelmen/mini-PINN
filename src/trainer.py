@@ -953,6 +953,15 @@ def trainer(
             **checks,
             **grad_stats,
         }
+
+        # Add norm weight logging
+        if getattr(params, 'hybrid_training', False):
+            norm_w = weighter.get_normalized_weights(loss_dict)
+            log_dict["weights/physics_weight_norm"] = norm_w["physics"]
+            log_dict["weights/data_weight_norm"] = norm_w["data"]
+            if getattr(params, 'use_deriv_loss', False):
+                log_dict["weights/deriv_weight_norm"] = norm_w["deriv"]
+        
         # Log m value if m loss is being used
         if getattr(params, "use_m_loss", False):
             log_dict["info/m_loss_m_value"] = getattr(params, "m_loss_m_value", 0.0)

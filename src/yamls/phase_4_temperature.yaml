@@ -8,7 +8,7 @@ base_config: &BASE_CONFIG
     ## parameters
   random_seed: 42
 
-  run_name: "MEGADATA_LOGX_dataw10_startphys0_clip1_cosine_dec_1000ep_min1000extra"
+  run_name: "MEGADATA_LOGX_gradually_add_losses_clip1_cosine_restart"
   wandb_notes: "mega data change, even more mega data range. \
     Using best model from 1e-6 clamp, with log x as detached 4th input"
 ## wandb parameters
