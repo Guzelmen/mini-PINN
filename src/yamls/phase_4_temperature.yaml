@@ -16,6 +16,7 @@ base_config: &BASE_CONFIG
   wandb_group: "week09mar"
   wandb_project: "mini_pinn"
   wandb_entity: "guzelmen_msci_project"
+  wandb_tags: ["norm_loss_weights_to_1", "16384pts_perbatch"]
 
   phase: 4 # temperature-dependent TF
   n_vars: 3  # network inputs
@@ -65,6 +66,12 @@ base_config: &BASE_CONFIG
   cosine_decay_epochs: 800  # Fixed cosine decay period (omit to use total_epochs - warmup)
   grad_clipping: True  # Clips to clip_value
   clip_value: 1.0
+
+  # Extra min-LR tail: run the chosen schedule for (epochs - extra_epoch_amount)
+  # epochs, then hold at min_lr for the remaining extra_epoch_amount epochs.
+  # Overrides cosine_decay_epochs when lr_type is cosine.
+  add_extra_minlr_epochs: False
+  extra_epoch_amount: 0
 
   ## loss parameters
   loss_type: "mse"

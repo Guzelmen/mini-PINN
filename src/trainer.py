@@ -17,6 +17,29 @@ import json
 import resource
 
 
+def wrap_with_minlr_tail(lr_lambda, schedule_epochs, min_lr, base_lr):
+    """
+    Wraps an lr_lambda so that after `schedule_epochs` epochs the LR is held
+    constant at min_lr.  For epochs < schedule_epochs the original lambda is
+    used unchanged; for epochs >= schedule_epochs the multiplier is clamped to
+    min_lr / base_lr.
+
+    Args:
+        lr_lambda: callable(epoch) -> float multiplier
+        schedule_epochs: epoch index (exclusive) at which to start the flat tail
+        min_lr: absolute minimum LR to hold during the tail
+        base_lr: the optimizer's base LR (used to convert min_lr to a multiplier)
+    """
+    _min_multiplier = min_lr / base_lr
+
+    def wrapped(epoch):
+        if epoch < schedule_epochs:
+            return lr_lambda(epoch)
+        return _min_multiplier
+
+    return wrapped
+
+
 def get_constant_scheduler(optimizer):
     """
     Create a constant learning rate scheduler (no scheduling).
@@ -219,35 +242,69 @@ def trainer(
     restart_period = params.get('cosine_restart_period', None)
     restart_decay_factor = getattr(params, 'restart_decay_factor', 0.6)
 
+    # Extra min-LR tail: run the chosen schedule for (epochs - extra_epoch_amount)
+    # epochs, then hold at min_lr for the remaining extra_epoch_amount epochs.
+    add_extra_minlr_epochs = getattr(params, 'add_extra_minlr_epochs', False)
+    extra_epoch_amount = getattr(params, 'extra_epoch_amount', 0)
+    if add_extra_minlr_epochs and extra_epoch_amount > 0:
+        schedule_epochs = max(1, epochs - extra_epoch_amount)
+    else:
+        schedule_epochs = epochs
+
     # Initialize optimizer and scheduler based on lr_type
     if lr_type == "constant":
         constant_lr = params.constant_lr
         optimizer = Adam(model.parameters(), lr=constant_lr)
-        scheduler = get_constant_scheduler(optimizer)
-        print(f"LR schedule: constant at {constant_lr:.2e}")
+        if add_extra_minlr_epochs and extra_epoch_amount > 0:
+            def _const_lambda(_epoch):
+                return 1.0
+            wrapped = wrap_with_minlr_tail(_const_lambda, schedule_epochs, min_lr, constant_lr)
+            scheduler = LambdaLR(optimizer, wrapped)
+            print(f"LR schedule: constant at {constant_lr:.2e} for {schedule_epochs} epochs, "
+                  f"then min_lr {min_lr:.2e} for {extra_epoch_amount} epochs")
+        else:
+            scheduler = get_constant_scheduler(optimizer)
+            print(f"LR schedule: constant at {constant_lr:.2e}")
 
     elif lr_type == "linear":
         # Linear warmup then constant
         optimizer = Adam(model.parameters(), lr=end_lr)
-        scheduler = get_warmup_linear_scheduler(
-            optimizer, warmup_epochs, start_lr, end_lr)
-        print(
-            f"LR schedule: {warmup_epochs} epochs warmup ({start_lr:.2e} -> {end_lr:.2e}), "
-            f"then constant at {end_lr:.2e}")
+        msg = (f"LR schedule: {warmup_epochs} epochs warmup ({start_lr:.2e} -> {end_lr:.2e}), "
+               f"then constant at {end_lr:.2e}")
+        if add_extra_minlr_epochs and extra_epoch_amount > 0:
+            # Build the base lambda and wrap with min_lr tail
+            _sched_tmp = get_warmup_linear_scheduler(optimizer, warmup_epochs, start_lr, end_lr)
+            wrapped = wrap_with_minlr_tail(_sched_tmp.lr_lambdas[0], schedule_epochs, min_lr, end_lr)
+            scheduler = LambdaLR(optimizer, wrapped)
+            msg += f", then min_lr {min_lr:.2e} for {extra_epoch_amount} epochs"
+        else:
+            scheduler = get_warmup_linear_scheduler(optimizer, warmup_epochs, start_lr, end_lr)
+        print(msg)
 
     elif lr_type == "cos" or lr_type == "cosine":
         # Linear warmup + cosine decay (+ optional hold at min_lr)
+        # When add_extra_minlr_epochs, cosine_decay_epochs is overridden by the tail logic.
         optimizer = Adam(model.parameters(), lr=end_lr)
-        scheduler = get_warmup_cosine_scheduler(
-            optimizer, warmup_epochs, start_lr, end_lr, min_lr, epochs,
-            cosine_decay_epochs=cosine_decay_epochs)
-        decay_len = cosine_decay_epochs if cosine_decay_epochs is not None else (epochs - warmup_epochs)
+        effective_cosine_decay = None if add_extra_minlr_epochs else cosine_decay_epochs
+        decay_len = effective_cosine_decay if effective_cosine_decay is not None else (schedule_epochs - warmup_epochs)
         schedule_msg = (
             f"LR schedule: {warmup_epochs} epochs warmup ({start_lr:.2e} -> {end_lr:.2e}), "
             f"then cosine decay to {min_lr:.2e} over {decay_len} epochs")
-        if cosine_decay_epochs is not None:
-            hold_epochs = max(0, epochs - warmup_epochs - cosine_decay_epochs)
+        if effective_cosine_decay is not None:
+            hold_epochs = max(0, schedule_epochs - warmup_epochs - effective_cosine_decay)
             schedule_msg += f", then hold at {min_lr:.2e} for {hold_epochs} epochs"
+        if add_extra_minlr_epochs and extra_epoch_amount > 0:
+            # Build a temporary scheduler just to grab its lambda, then wrap
+            _tmp = get_warmup_cosine_scheduler(
+                optimizer, warmup_epochs, start_lr, end_lr, min_lr, schedule_epochs,
+                cosine_decay_epochs=effective_cosine_decay)
+            wrapped = wrap_with_minlr_tail(_tmp.lr_lambdas[0], schedule_epochs, min_lr, end_lr)
+            scheduler = LambdaLR(optimizer, wrapped)
+            schedule_msg += f", then min_lr tail for {extra_epoch_amount} epochs"
+        else:
+            scheduler = get_warmup_cosine_scheduler(
+                optimizer, warmup_epochs, start_lr, end_lr, min_lr, schedule_epochs,
+                cosine_decay_epochs=effective_cosine_decay)
         print(schedule_msg)
 
     elif lr_type == "cosine_restarts":
@@ -255,28 +312,43 @@ def trainer(
         if restart_period is None:
             raise ValueError("lr_type='cosine_restarts' requires cosine_restart_period to be set")
         optimizer = Adam(model.parameters(), lr=end_lr)
-        scheduler = get_warmup_cosine_restarts_scheduler(
-            optimizer, warmup_epochs, start_lr, end_lr, min_lr, restart_period)
-        n_restarts = max(0, (epochs - warmup_epochs) // restart_period - 1)
-        print(
-            f"LR schedule: {warmup_epochs} epochs warmup ({start_lr:.2e} -> {end_lr:.2e}), "
-            f"then cosine restarts ({end_lr:.2e} -> {min_lr:.2e}) every {restart_period} epochs "
-            f"(~{n_restarts} restarts over {epochs} epochs)")
+        n_restarts = max(0, (schedule_epochs - warmup_epochs) // restart_period - 1)
+        msg = (f"LR schedule: {warmup_epochs} epochs warmup ({start_lr:.2e} -> {end_lr:.2e}), "
+               f"then cosine restarts ({end_lr:.2e} -> {min_lr:.2e}) every {restart_period} epochs "
+               f"(~{n_restarts} restarts over {schedule_epochs} epochs)")
+        if add_extra_minlr_epochs and extra_epoch_amount > 0:
+            _tmp = get_warmup_cosine_restarts_scheduler(
+                optimizer, warmup_epochs, start_lr, end_lr, min_lr, restart_period)
+            wrapped = wrap_with_minlr_tail(_tmp.lr_lambdas[0], schedule_epochs, min_lr, end_lr)
+            scheduler = LambdaLR(optimizer, wrapped)
+            msg += f", then min_lr {min_lr:.2e} for {extra_epoch_amount} epochs"
+        else:
+            scheduler = get_warmup_cosine_restarts_scheduler(
+                optimizer, warmup_epochs, start_lr, end_lr, min_lr, restart_period)
+        print(msg)
 
     elif lr_type == "cosine_decaying_restarts":
         # Linear warmup + cosine restarts with geometrically decaying peaks
         if restart_period is None:
             raise ValueError("lr_type='cosine_decaying_restarts' requires cosine_restart_period to be set")
         optimizer = Adam(model.parameters(), lr=end_lr)
-        scheduler = get_warmup_cosine_decaying_restarts_scheduler(
-            optimizer, warmup_epochs, start_lr, end_lr, min_lr, restart_period,
-            restart_decay_factor=restart_decay_factor)
-        n_restarts = max(0, (epochs - warmup_epochs) // restart_period - 1)
-        print(
-            f"LR schedule: {warmup_epochs} epochs warmup ({start_lr:.2e} -> {end_lr:.2e}), "
-            f"then cosine decaying restarts every {restart_period} epochs "
-            f"(peaks: {end_lr:.2e}, {end_lr*restart_decay_factor:.2e}, {end_lr*restart_decay_factor**2:.2e}, ... "
-            f"-> {min_lr:.2e}, decay_factor={restart_decay_factor}, ~{n_restarts} restarts)")
+        n_restarts = max(0, (schedule_epochs - warmup_epochs) // restart_period - 1)
+        msg = (f"LR schedule: {warmup_epochs} epochs warmup ({start_lr:.2e} -> {end_lr:.2e}), "
+               f"then cosine decaying restarts every {restart_period} epochs "
+               f"(peaks: {end_lr:.2e}, {end_lr*restart_decay_factor:.2e}, {end_lr*restart_decay_factor**2:.2e}, ... "
+               f"-> {min_lr:.2e}, decay_factor={restart_decay_factor}, ~{n_restarts} restarts)")
+        if add_extra_minlr_epochs and extra_epoch_amount > 0:
+            _tmp = get_warmup_cosine_decaying_restarts_scheduler(
+                optimizer, warmup_epochs, start_lr, end_lr, min_lr, restart_period,
+                restart_decay_factor=restart_decay_factor)
+            wrapped = wrap_with_minlr_tail(_tmp.lr_lambdas[0], schedule_epochs, min_lr, end_lr)
+            scheduler = LambdaLR(optimizer, wrapped)
+            msg += f", then min_lr {min_lr:.2e} for {extra_epoch_amount} epochs"
+        else:
+            scheduler = get_warmup_cosine_decaying_restarts_scheduler(
+                optimizer, warmup_epochs, start_lr, end_lr, min_lr, restart_period,
+                restart_decay_factor=restart_decay_factor)
+        print(msg)
 
     else:
         raise ValueError(
