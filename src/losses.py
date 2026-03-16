@@ -821,6 +821,34 @@ def compute_deriv_loss_phase4(outputs, inputs, deriv_targets, params, val_stage=
     return loss
 
 
+def compute_boundary_loss_phase4(outputs, inputs, targets, params, val_stage=False):
+    """
+    Auxiliary boundary loss: rel_l2 error between predictions and targets at x=1.
+    Selects exactly x=1.0 points (the solver always places the last grid point at x=1).
+
+    Args:
+        outputs: ψ(x) predictions from network, shape [batch, 1]
+        inputs: [batch, 3] with columns [x, alpha, T_kV]
+        targets: solver targets, shape [batch, 1] or [batch, 2] (psi, dpsi/dx)
+        params: config
+        val_stage: unused (kept for API consistency)
+
+    Returns:
+        boundary_loss: mean relative L2 loss at x=1 points
+    """
+    x_vals = inputs[:, 0]
+    mask = (x_vals == 1.0)
+    if mask.sum() == 0:
+        return torch.tensor(0.0, device=outputs.device)
+
+    psi_pred = outputs[mask]
+    psi_true = targets[mask, 0:1] if targets.dim() == 2 else targets[mask].unsqueeze(1)
+
+    scale = torch.abs(psi_true) + 1e-8
+    loss = torch.mean(((psi_pred - psi_true) / scale) ** 2)
+    return loss
+
+
 class LossWeighter_phase4:
     """
     Handles loss weighting for Phase 4 (temperature-dependent TF).
@@ -849,10 +877,16 @@ class LossWeighter_phase4:
         # Delayed cosine for deriv weight only
         self.deriv_weight_delayed_cosine = getattr(params, 'deriv_weight_delayed_cosine', False)
         self.deriv_weight_delay_epochs = getattr(params, 'deriv_weight_delay_epochs', 0)
+        # Boundary loss at x=1
+        self.use_boundary_loss = getattr(params, 'use_boundary_loss', False)
+        self.boundary_weight = getattr(params, 'boundary_loss_weight', 0.0)
+        self.boundary_weight_final = getattr(params, 'boundary_loss_weight_final', 0.0)
+        self.boundary_weight_delay_epochs = getattr(params, 'boundary_weight_delay_epochs', 0)
         # Snapshots of initial weights (immutable reference points for cosine interpolation)
         self.physics_weight_initial = self.physics_weight
         self.data_weight_initial = self.data_weight
         self.deriv_weight_initial = self.deriv_weight
+        self.boundary_weight_initial = self.boundary_weight
 
         if self.mode == "hard":
             self.residual_weight = 1.0
@@ -908,26 +942,30 @@ class LossWeighter_phase4:
         return total
 
     def get_weighted_loss(self, loss_dict):
-        """Compute total weighted loss (physics + data + deriv if hybrid)."""
+        """Compute total weighted loss (physics + data + deriv + boundary if enabled)."""
         physics_total = self.get_physics_loss(loss_dict)
 
         # Collect raw weights
         w_phys = self.physics_weight
         w_data = self.data_weight if (self.hybrid_training and "data" in loss_dict) else 0.0
         w_deriv = self.deriv_weight if (self.use_deriv_loss and "deriv" in loss_dict) else 0.0
-        
+        w_boundary = self.boundary_weight if (self.use_boundary_loss and "boundary" in loss_dict) else 0.0
+
         # Normalize to sum to 1
-        w_sum = w_phys + w_data + w_deriv
+        w_sum = w_phys + w_data + w_deriv + w_boundary
         if w_sum > 0:
             w_phys /= w_sum
             w_data /= w_sum
             w_deriv /= w_sum
+            w_boundary /= w_sum
 
         total = w_phys * physics_total
         if self.hybrid_training and "data" in loss_dict:
             total = total + w_data * loss_dict["data"]
         if self.use_deriv_loss and "deriv" in loss_dict:
             total = total + w_deriv * loss_dict["deriv"]
+        if self.use_boundary_loss and "boundary" in loss_dict:
+            total = total + w_boundary * loss_dict["boundary"]
 
         return total
 
@@ -936,14 +974,16 @@ class LossWeighter_phase4:
         w_phys = self.physics_weight
         w_data = self.data_weight if (self.hybrid_training and "data" in loss_dict) else 0.0
         w_deriv = self.deriv_weight if (self.use_deriv_loss and "deriv" in loss_dict) else 0.0
-        
-        w_sum = w_phys + w_data + w_deriv
+        w_boundary = self.boundary_weight if (self.use_boundary_loss and "boundary" in loss_dict) else 0.0
+
+        w_sum = w_phys + w_data + w_deriv + w_boundary
         if w_sum > 0:
             w_phys /= w_sum
             w_data /= w_sum
             w_deriv /= w_sum
-        
-        return {"physics": w_phys, "data": w_data, "deriv": w_deriv}        
+            w_boundary /= w_sum
+
+        return {"physics": w_phys, "data": w_data, "deriv": w_deriv, "boundary": w_boundary}
 
 
 def compute_total_loss_phase4(loss_dict, weighter):

@@ -111,6 +111,12 @@ base_config: &BASE_CONFIG
   # Set False to revert to normal full-range cosine schedule.
   deriv_weight_delayed_cosine: True  # Set True to enable
   deriv_weight_delay_epochs: 500       # Number of epochs to hold deriv_loss_weight fixed before cosine begins
+  # Auxiliary boundary loss (x=1 points vs solver targets, rel_l2)
+  # Weight is held at initial value for boundary_weight_delay_epochs, then cosine-interpolates to final.
+  use_boundary_loss: False          # Set True to enable
+  boundary_loss_weight: 0.0         # Initial weight (held for delay epochs)
+  boundary_loss_weight_final: 4.0   # Final weight after cosine ramp
+  boundary_weight_delay_epochs: 750 # Epochs before cosine begins
 
   ## derivative target loss
   use_deriv_loss: True        # If True, add dψ/dx matching loss from solver data

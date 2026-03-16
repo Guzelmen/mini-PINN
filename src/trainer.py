@@ -436,6 +436,8 @@ def trainer(
             epoch_losses['physics'] = []
         if getattr(params, 'use_deriv_loss', False):
             epoch_losses['deriv'] = []
+        if getattr(params, 'use_boundary_loss', False):
+            epoch_losses['boundary'] = []
 
         # Collect raw losses for adaptive weighting (update once per epoch)
         raw_losses_for_weighting = {'residual': [], 'bc_1': [], 'bc_2': []}
@@ -628,6 +630,15 @@ def trainer(
                 deriv_loss = torch.tensor(0.0, device=outputs.device)
             t_loss_deriv_end = time.time()
 
+            # --- Boundary loss (x=1 points) ---
+            use_boundary_loss = getattr(params, 'use_boundary_loss', False)
+            skip_boundary = (weighter.boundary_weight == 0.0) if use_boundary_loss else True
+            if use_boundary_loss and targets is not None and not skip_boundary:
+                boundary_loss = losses.compute_boundary_loss_phase4(outputs, inputs, targets, params)
+                loss_dict['boundary'] = boundary_loss
+            else:
+                boundary_loss = torch.tensor(0.0, device=outputs.device)
+
             # For adaptive weighting: collect raw losses, don't update weights yet
             if weighter.strategy == 'adaptive' or weighter.hybrid_strategy == 'adaptive':
                 raw_losses_for_weighting['residual'].append(
@@ -733,6 +744,8 @@ def trainer(
                 epoch_losses['physics'].append(physics_loss.item() if torch.is_tensor(physics_loss) else physics_loss)
             if use_deriv_loss:
                 epoch_losses['deriv'].append(deriv_loss.item())
+            if use_boundary_loss:
+                epoch_losses['boundary'].append(boundary_loss.item())
             epoch_losses['total'].append(total_loss.item())
 
             # Update progress bar
@@ -801,6 +814,7 @@ def trainer(
         avg_fmt = np.mean(epoch_losses['fmt']) if 'fmt' in epoch_losses else 0.0
         avg_data = np.mean(epoch_losses['data']) if 'data' in epoch_losses and len(epoch_losses['data']) > 0 else 0.0
         avg_deriv = np.mean(epoch_losses['deriv']) if 'deriv' in epoch_losses and len(epoch_losses['deriv']) > 0 else 0.0
+        avg_boundary = np.mean(epoch_losses['boundary']) if 'boundary' in epoch_losses and len(epoch_losses['boundary']) > 0 else 0.0
         if getattr(params, "debug_mode", False):
             print("We have data loss:", 'data' in epoch_losses)
             print("Min and max data loss:", np.min(epoch_losses['data']) if 'data' in epoch_losses and len(epoch_losses['data']) > 0 else 'N/A', np.max(epoch_losses['data']) if 'data' in epoch_losses and len(epoch_losses['data']) > 0 else 'N/A')
@@ -892,6 +906,19 @@ def trainer(
                                              + (weighter.deriv_weight_final - weighter.deriv_weight_initial)
                                              * cosine_factor)
 
+            # Boundary weight: always delayed cosine
+            if weighter.use_boundary_loss:
+                delay = weighter.boundary_weight_delay_epochs
+                if ep < delay:
+                    weighter.boundary_weight = weighter.boundary_weight_initial
+                else:
+                    remaining = max(epochs - 1 - delay, 1)
+                    t_bnd = (ep - delay) / remaining
+                    bnd_cosine = 0.5 * (1.0 - math.cos(math.pi * t_bnd))
+                    weighter.boundary_weight = (weighter.boundary_weight_initial
+                                                + (weighter.boundary_weight_final - weighter.boundary_weight_initial)
+                                                * bnd_cosine)
+
         # Update scheduler AFTER all batches (PyTorch best practice)
         scheduler.step()
         # Update for next epoch's logging
@@ -954,11 +981,13 @@ def trainer(
             **({"train/fmt_loss": avg_fmt} if 'fmt' in epoch_losses else {}),
             **({"train/data_loss": avg_data, "train/physics_loss": avg_physics} if getattr(params, 'hybrid_training', False) else {}),
             **({"train/deriv_loss": avg_deriv} if getattr(params, 'use_deriv_loss', False) else {}),
+            **({"train/boundary_loss": avg_boundary} if getattr(params, 'use_boundary_loss', False) else {}),
             "train/total_loss": avg_total,
             **({"weights/residual_weight": weighter.residual_weight, "weights/bc_1_weight": weighter.bc_1_weight, "weights/bc_2_weight": weighter.bc_2_weight} if is_soft_mode else {}),
             **({"weights/fmt_weight": weighter.fmt_weight} if getattr(params, "fmt_help", False) else {}),
             **({"weights/physics_weight": weighter.physics_weight, "weights/data_weight": weighter.data_weight} if getattr(params, 'hybrid_training', False) else {}),
             **({"weights/deriv_weight": weighter.deriv_weight} if getattr(params, 'use_deriv_loss', False) else {}),
+            **({"weights/boundary_weight": weighter.boundary_weight} if getattr(params, 'use_boundary_loss', False) else {}),
             **checks,
             **grad_stats,
         }
@@ -970,6 +999,8 @@ def trainer(
             log_dict["weights/data_weight_norm"] = norm_w["data"]
             if getattr(params, 'use_deriv_loss', False):
                 log_dict["weights/deriv_weight_norm"] = norm_w["deriv"]
+            if getattr(params, 'use_boundary_loss', False):
+                log_dict["weights/boundary_weight_norm"] = norm_w["boundary"]
         
         # Log m value if m loss is being used
         if getattr(params, "use_m_loss", False):
@@ -989,6 +1020,8 @@ def trainer(
                 val_losses['physics'] = []
             if getattr(params, 'use_deriv_loss', False):
                 val_losses['deriv'] = []
+            if getattr(params, 'use_boundary_loss', False):
+                val_losses['boundary'] = []
 
             for batch in val:
                 # Extract inputs (and targets if present in data)
@@ -1068,6 +1101,14 @@ def trainer(
                 else:
                     val_deriv_loss = torch.tensor(0.0, device=outputs.device)
 
+                # Boundary loss at x=1 for validation
+                use_boundary_loss = getattr(params, 'use_boundary_loss', False)
+                if use_boundary_loss and targets is not None:
+                    val_boundary_loss = losses.compute_boundary_loss_phase4(outputs, inputs, targets, params, val_stage=True)
+                    val_losses['boundary'].append(val_boundary_loss.item())
+                else:
+                    val_boundary_loss = torch.tensor(0.0, device=outputs.device)
+
                 # Compute val total loss: unweighted sum (no hybrid weighting on val)
                 val_loss_dict = {
                     'residual': residual_loss,
@@ -1098,6 +1139,7 @@ def trainer(
             avg_val_fmt = np.mean(val_losses['fmt']) if 'fmt' in val_losses else 0.0
             avg_val_data = np.mean(val_losses['data']) if 'data' in val_losses and len(val_losses['data']) > 0 else 0.0
             avg_val_deriv = np.mean(val_losses['deriv']) if 'deriv' in val_losses and len(val_losses['deriv']) > 0 else 0.0
+            avg_val_boundary = np.mean(val_losses['boundary']) if 'boundary' in val_losses and len(val_losses['boundary']) > 0 else 0.0
             avg_val_physics = np.mean(val_losses['physics']) if 'physics' in val_losses and len(val_losses['physics']) > 0 else 0.0
             time_end_val = time.time()
             time_taken_val = time_end_val - time_start_val
@@ -1112,6 +1154,7 @@ def trainer(
                     **({"val/fmt_loss": avg_val_fmt} if 'fmt' in val_losses else {}),
                     **({"val/data_loss": avg_val_data, "val/physics_loss": avg_val_physics} if getattr(params, 'hybrid_training', False) else {}),
                     **({"val/deriv_loss": avg_val_deriv} if getattr(params, 'use_deriv_loss', False) else {}),
+                    **({"val/boundary_loss": avg_val_boundary} if getattr(params, 'use_boundary_loss', False) else {}),
                     "val/total_loss": avg_val_total,
                     "info/epoch_validation_time": time_taken_val
                 })
