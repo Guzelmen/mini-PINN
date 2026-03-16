@@ -1348,13 +1348,14 @@ def trainer(
         if _plot_data is not None and ep % _plots_every == 0:
             from .eval_inference.training_plots import generate_epoch_plots
             model.eval()
+            _prev_grad = torch.is_grad_enabled()
             torch.set_grad_enabled(True)
             try:
                 generate_epoch_plots(model, _plot_data, ep, params)
             except Exception as _plot_exc:
                 print(f"[training_plots] WARNING: plot generation failed at epoch {ep}: {_plot_exc}")
             finally:
-                torch.set_grad_enabled(False)
+                torch.set_grad_enabled(_prev_grad)
                 model.train()
 
     if len(predictions) != 0 and getattr(params, "save_preds", False):

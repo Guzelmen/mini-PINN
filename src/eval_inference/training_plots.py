@@ -239,13 +239,12 @@ def _plot_x_alpha_colormap(x_np, alpha_np, values_np, T_val, metric_name, metric
     cbar = fig.colorbar(sc, ax=ax)
     cbar.set_label(metric_label)
 
-    ax.set_xscale("log")
     ax.set_xlabel(r"$x$")
     ax.set_ylabel(r"$\alpha$")
     ax.set_title(rf"$T = {T_val:.4g}$ keV — {metric_name}")
 
     fig.tight_layout()
-    fname = f"T{T_val:.6g}keV_{metric_name}_logx.png"
+    fname = f"T{T_val:.6g}keV_{metric_name}_linx.png"
     save_path = out_dir / fname
     fig.savefig(save_path, dpi=150)
     plt.close(fig)
@@ -276,10 +275,8 @@ def generate_epoch_plots(model, plot_data: PlotData, ep: int, params, batch_size
     # ------------------------------------------------------------------ #
     if plot_data.at_inputs.shape[0] > 0:
         print("  [1/3] alpha-T boundary plots...")
-        torch.set_grad_enabled(True)
         pde_at  = compute_rel_pde_residual(model, plot_data.at_inputs, batch_size)
         phi_at  = compute_rel_phi_error(model, plot_data.at_inputs, plot_data.at_targets, batch_size)
-        torch.set_grad_enabled(False)
 
         alpha_np = plot_data.at_inputs[:, 1].numpy()
         T_np     = plot_data.at_inputs[:, 2].numpy()
@@ -313,9 +310,7 @@ def generate_epoch_plots(model, plot_data: PlotData, ep: int, params, batch_size
         inp  = plot_data.val_inputs[mask]
         tgt  = plot_data.val_targets[mask]
 
-        torch.set_grad_enabled(True)
         pde_vals = compute_rel_pde_residual(model, inp, batch_size)
-        torch.set_grad_enabled(False)
         phi_vals = compute_rel_phi_error(model, inp, tgt, batch_size)
 
         x_np = inp[:, 0].numpy()
@@ -326,14 +321,14 @@ def generate_epoch_plots(model, plot_data: PlotData, ep: int, params, batch_size
             metric_name="pde_residual",
             metric_label=r"$|\mathrm{residual}| / |\mathrm{RHS}|$",
             out_dir=xT_pde_dir,
-            log_x=True,
+            log_x=False,
         )
         plot_colormap(
             x_np, T_np, phi_vals, alpha_val,
             metric_name="phi_error",
             metric_label=r"$|\phi_\mathrm{pred} - \phi_\mathrm{target}| / |\phi_\mathrm{target}|$",
             out_dir=xT_tgt_dir,
-            log_x=True,
+            log_x=False,
         )
 
     # ------------------------------------------------------------------ #
@@ -348,9 +343,7 @@ def generate_epoch_plots(model, plot_data: PlotData, ep: int, params, batch_size
         inp  = plot_data.val_inputs[mask]
         tgt  = plot_data.val_targets[mask]
 
-        torch.set_grad_enabled(True)
         pde_vals = compute_rel_pde_residual(model, inp, batch_size)
-        torch.set_grad_enabled(False)
         phi_vals = compute_rel_phi_error(model, inp, tgt, batch_size)
 
         x_np     = inp[:, 0].numpy()
