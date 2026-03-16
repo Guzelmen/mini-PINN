@@ -140,9 +140,13 @@ base_config: &BASE_CONFIG
 
   # saving
   save_preds: False
-  save_every: 100
+  save_every: 1000
   plot_auto: False
   save_weights: True
   save_weights_every: 100
   pred_dir: "predictions"
   plot_dir: "plot_predictions"
+
+  # diagnostic plots during training
+  save_plots_during_training: True
+  save_training_plots_every: 250

@@ -397,6 +397,14 @@ def trainer(
     if getattr(params, 'use_wandb', True):
         wandb.log({"info/n_params": n_params})
 
+    # Prepare diagnostic plot data (Phase 4 only, if enabled)
+    _plot_data = None
+    _save_plots = getattr(params, 'save_plots_during_training', False)
+    _plots_every = getattr(params, 'save_training_plots_every', None)
+    if _save_plots and getattr(params, 'phase', None) == 4 and isinstance(_plots_every, int) and _plots_every > 0:
+        from .eval_inference.training_plots import prepare_plot_data
+        _plot_data = prepare_plot_data(params)
+
     for ep in range(1, epochs+1):
         time_start = time.time()
         
@@ -793,8 +801,9 @@ def trainer(
         avg_fmt = np.mean(epoch_losses['fmt']) if 'fmt' in epoch_losses else 0.0
         avg_data = np.mean(epoch_losses['data']) if 'data' in epoch_losses and len(epoch_losses['data']) > 0 else 0.0
         avg_deriv = np.mean(epoch_losses['deriv']) if 'deriv' in epoch_losses and len(epoch_losses['deriv']) > 0 else 0.0
-        print("We have data loss:", 'data' in epoch_losses)
-        print("Min and max data loss:", np.min(epoch_losses['data']) if 'data' in epoch_losses and len(epoch_losses['data']) > 0 else 'N/A', np.max(epoch_losses['data']) if 'data' in epoch_losses and len(epoch_losses['data']) > 0 else 'N/A')
+        if getattr(params, "debug_mode", False):
+            print("We have data loss:", 'data' in epoch_losses)
+            print("Min and max data loss:", np.min(epoch_losses['data']) if 'data' in epoch_losses and len(epoch_losses['data']) > 0 else 'N/A', np.max(epoch_losses['data']) if 'data' in epoch_losses and len(epoch_losses['data']) > 0 else 'N/A')
         avg_physics = np.mean(epoch_losses['physics']) if 'physics' in epoch_losses and len(epoch_losses['physics']) > 0 else 0.0
 
         # Update physics sub-loss weights once per epoch for adaptive strategy
@@ -1334,6 +1343,19 @@ def trainer(
             ckpt_path = weights_dir / f"weights_epoch_{ep}"
             torch.save(model.state_dict(), ckpt_path)
             print(f"Saved weights checkpoint to {ckpt_path}")
+
+        # Periodic diagnostic plots
+        if _plot_data is not None and ep % _plots_every == 0:
+            from .eval_inference.training_plots import generate_epoch_plots
+            model.eval()
+            torch.set_grad_enabled(True)
+            try:
+                generate_epoch_plots(model, _plot_data, ep, params)
+            except Exception as _plot_exc:
+                print(f"[training_plots] WARNING: plot generation failed at epoch {ep}: {_plot_exc}")
+            finally:
+                torch.set_grad_enabled(False)
+                model.train()
 
     if len(predictions) != 0 and getattr(params, "save_preds", False):
         save_path = PROJECT_ROOT / params.pred_dir / f"phase{params.phase}" / f"{params.run_name}.pkl"
