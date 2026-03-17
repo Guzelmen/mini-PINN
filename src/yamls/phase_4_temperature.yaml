@@ -16,7 +16,7 @@ base_config: &BASE_CONFIG
   wandb_group: "week09mar"
   wandb_project: "mini_pinn"
   wandb_entity: "guzelmen_msci_project"
-  wandb_tags: ["norm_loss_weights_to_1", "16384pts_perbatch"]
+  wandb_tags: ["norm_loss_weights_to_1", "8192pts_perbatch"]
 
   phase: 4 # temperature-dependent TF
   n_vars: 3  # network inputs
@@ -90,6 +90,7 @@ base_config: &BASE_CONFIG
   hybrid_training: True  # If True, combine PDE loss with data loss
   use_solver_data: True  # If True, load data in {inputs, targets} format
   data_loss_type: "rel_l2"  # options: "mse", "rel_l2"
+  val_norm: "rel_l2"  # "rel_l2" or "rel_l1" — controls ALL validation losses
   hybrid_weight_strategy: "fixed"  # "fixed" or "adaptive" (adaptive overrides schedule below)
   hybrid_weight_schedule: "cosine"  # "fixed", "step", or "cosine"
   # Starting weights (epoch 0)
@@ -136,7 +137,7 @@ base_config: &BASE_CONFIG
   interp_val_n_samples: 50000
   ood_eval_interval: 50
 
-  batch_size: 16384
+  batch_size: 8192
   shuffle_train: True
   use_sqrtx: False
 
@@ -155,4 +156,4 @@ base_config: &BASE_CONFIG
 
   # diagnostic plots during training
   save_plots_during_training: True
-  save_training_plots_every: 250
+  save_training_plots_every: 100

@@ -6,6 +6,14 @@ from .fd_integrals import fermi_dirac_half, compute_lambda, compute_gamma, B_M, 
 import math
 
 
+def _apply_val_norm(diff, scale, val_norm):
+    normed = diff / scale
+    if val_norm == "rel_l1":
+        return torch.mean(torch.abs(normed))
+    else:  # default: "rel_l2"
+        return torch.mean(normed ** 2)
+
+
 def compute_residual_loss_phase1(outputs, inputs):
     """
     Computes the PDE residual loss.
@@ -708,10 +716,14 @@ def compute_residual_loss_phase4(outputs, inputs, params, val_stage: bool = Fals
         print("[Phase4 loss] Warning: ψ is negative in some samples")
 
     # Compute loss
-    if params.loss_type == "mse":
-        loss = torch.mean(norm_residual ** 2)
+    if val_stage:
+        val_norm = getattr(params, "val_norm", "rel_l2")
+        loss = _apply_val_norm(residual, scale, val_norm)
     else:
-        raise ValueError(f"Unknown loss_type: {params.loss_type}")
+        if params.loss_type == "mse":
+            loss = torch.mean(norm_residual ** 2)
+        else:
+            raise ValueError(f"Unknown loss_type: {params.loss_type}")
 
     if _timing:
         timing_dict['residual_norm_mse'] = time.time() - _t0
@@ -761,21 +773,20 @@ def compute_data_loss_phase4(outputs, targets, params, val_stage=False):
     else:
         psi_true = targets
 
-    # Determine loss type: always rel_l2 for validation, otherwise check config
+    # Compute data loss
     if val_stage:
-        data_loss_type = "rel_l2"
+        val_norm = getattr(params, "val_norm", "rel_l2")
+        scale = torch.abs(psi_true) + 1e-8
+        loss = _apply_val_norm(psi_pred - psi_true, scale, val_norm)
     else:
         data_loss_type = getattr(params, "data_loss_type", "mse")
-
-    # Compute data loss
-    if data_loss_type == "mse":
-        loss = torch.mean((psi_pred - psi_true) ** 2)
-    elif data_loss_type == "rel_l2":
-        # Per-sample relative error: divide by |true| then mean of squared errors
-        scale = torch.abs(psi_true) + 1e-8
-        loss = torch.mean(((psi_pred - psi_true) / scale) ** 2)
-    else:
-        raise ValueError(f"Unknown data_loss_type: {loss_type}")
+        if data_loss_type == "mse":
+            loss = torch.mean((psi_pred - psi_true) ** 2)
+        elif data_loss_type == "rel_l2":
+            scale = torch.abs(psi_true) + 1e-8
+            loss = torch.mean(((psi_pred - psi_true) / scale) ** 2)
+        else:
+            raise ValueError(f"Unknown data_loss_type: {data_loss_type}")
 
     if getattr(params, "debug_mode", False):
         print(f"[Phase4 data loss {'VAL' if val_stage else 'TRAIN'}] loss_type={data_loss_type}")
@@ -808,9 +819,12 @@ def compute_deriv_loss_phase4(outputs, inputs, deriv_targets, params, val_stage=
     else:
         dpsi_true = deriv_targets
 
-    # Relative L2 normalization (always used, same for train and val)
     scale = torch.abs(dpsi_true) + 1e-8
-    loss = torch.mean(((dpsi_pred - dpsi_true) / scale) ** 2)
+    if val_stage:
+        val_norm = getattr(params, "val_norm", "rel_l2")
+        loss = _apply_val_norm(dpsi_pred - dpsi_true, scale, val_norm)
+    else:
+        loss = torch.mean(((dpsi_pred - dpsi_true) / scale) ** 2)
 
     if getattr(params, "debug_mode", False):
         print(f"[Phase4 deriv loss {'VAL' if val_stage else 'TRAIN'}]")
@@ -831,7 +845,7 @@ def compute_boundary_loss_phase4(outputs, inputs, targets, params, val_stage=Fal
         inputs: [batch, 3] with columns [x, alpha, T_kV]
         targets: solver targets, shape [batch, 1] or [batch, 2] (psi, dpsi/dx)
         params: config
-        val_stage: unused (kept for API consistency)
+        val_stage: if True, uses val_norm from params to select rel_l1 or rel_l2
 
     Returns:
         boundary_loss: mean relative L2 loss at x=1 points
@@ -845,7 +859,11 @@ def compute_boundary_loss_phase4(outputs, inputs, targets, params, val_stage=Fal
     psi_true = targets[mask, 0:1] if targets.dim() == 2 else targets[mask].unsqueeze(1)
 
     scale = torch.abs(psi_true) + 1e-8
-    loss = torch.mean(((psi_pred - psi_true) / scale) ** 2)
+    if val_stage:
+        val_norm = getattr(params, "val_norm", "rel_l2")
+        loss = _apply_val_norm(psi_pred - psi_true, scale, val_norm)
+    else:
+        loss = torch.mean(((psi_pred - psi_true) / scale) ** 2)
     return loss
 
 

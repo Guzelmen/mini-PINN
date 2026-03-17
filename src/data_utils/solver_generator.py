@@ -12,15 +12,20 @@ import torch
 import wandb
 from pathlib import Path
 from itertools import product
+import jax
+jax.config.update('jax_enable_x64', True)
 
 # Add solver paths - need both the examples dir and the parent for FDint_JAX
 SOLVER_REPO = '/rds/general/user/gs1622/home/MinimalTFFDintPy'
 SOLVER_EXAMPLES = f'{SOLVER_REPO}/examples'
+KSRISAX_REPO = '/rds/general/user/gs1622/home/KSRISax/src'
 
 if SOLVER_REPO not in sys.path:
     sys.path.insert(0, SOLVER_REPO)
 if SOLVER_EXAMPLES not in sys.path:
     sys.path.insert(0, SOLVER_EXAMPLES)
+if KSRISAX_REPO not in sys.path:
+    sys.path.insert(0, KSRISAX_REPO)
 
 from generalised_TF import solve_beta_bvp
 
@@ -30,7 +35,7 @@ B_M = 0.25 * (4.5 * math.pi**2)**(1/3) * A0_M  # Length scale b
 C0_M = 1.602e-11  # meters
 
 
-def generate_solution(alpha, T_kV, n_points=100, tol=1e-5, y_guess=None, w_grid=None, max_nodes=int(2e5)):
+def generate_solution(alpha, T_kV, n_points=100, tol=1e-5, y_guess=None, w_grid=None, max_nodes=int(2e5), method='scipy'):
     """
     Generate (x, psi) solution for given (alpha, T_kV).
     
@@ -59,16 +64,25 @@ def generate_solution(alpha, T_kV, n_points=100, tol=1e-5, y_guess=None, w_grid=
     a = gamma       # β(0) = γ since ψ(0) = 1
     wb = np.sqrt(2 * lam)  # w_max = √(2λ) since w² = 2λx and x_max = 1
 
-    # Solve in w-coordinates
-    sol = solve_beta_bvp(a, wb, n_points=n_points, tol=tol, y_guess=y_guess, w_grid=w_grid, max_nodes=max_nodes)
-
-    # Use the mesh actually used for the solution
+    # Use the mesh passed in, or build a default one
     if w_grid is not None:
         w_used = w_grid
     else:
         w_used = np.linspace(1e-6, wb, n_points)
-    beta = sol.sol(w_used)[0]
-    dbeta = sol.sol(w_used)[1]
+
+    # Solve in w-coordinates
+    if method == 'scipy':
+        sol = solve_beta_bvp(a, wb, n_points=n_points, tol=tol, y_guess=y_guess, w_grid=w_grid, max_nodes=max_nodes)
+        beta = sol.sol(w_used)[0]
+        dbeta = sol.sol(w_used)[1]
+    elif method == 'relax':
+        from KSRISax.ThomasFermi import ThomasFermiSolver
+        solver = ThomasFermiSolver(method='relaxation_JAX', tol=tol, max_nodes=max_nodes, max_steps=10000)
+        beta, dbeta = solver.solve_beta_bvp(a, wb, w_used)
+        beta = np.array(beta)
+        dbeta = np.array(dbeta)
+    else:
+        raise ValueError(f"Unknown method '{method}': choose 'scipy' or 'relax'")
 
     # Convert to x-coordinates: x = w²/(2λ)
     x = w_used**2 / (2 * lam)
@@ -93,6 +107,7 @@ def generate_phase4_solver(
     max_nodes=int(2e5),
     part=None,
     n_parts=4,
+    method='scipy',
 ):
     """
     Generate Phase 4 dataset using the numerical solver.
@@ -124,9 +139,9 @@ def generate_phase4_solver(
     if out_path is None:
         from ..utils import PROJECT_ROOT
         if part is not None:
-            out_path = PROJECT_ROOT / f"data/phase_4_solver_mega_fine_part{part}.pt"
+            out_path = PROJECT_ROOT / f"data/phase_4_solver_mega_fine_{method}_part{part}.pt"
         else:
-            out_path = PROJECT_ROOT / "data/phase_4_solver_mega_fine.pt"
+            out_path = PROJECT_ROOT / f"data/phase_4_solver_mega_fine_{method}.pt"
     
     np.random.seed(seed)
 
@@ -134,9 +149,9 @@ def generate_phase4_solver(
     part_suffix = f"_part{part}of{n_parts}" if part is not None else ""
     wandb.login()
     wandb.init(
-        name=f"phase_4_solver_mega_fine{part_suffix}",
+        name=f"phase_4_solver_mega_fine_{method}{part_suffix}",
         notes=f"Alpha ~2-22 (r0 from 1e-10 to 1e-9 m) - {n_alpha} vals, T 0.0001-10 keV - {n_T} vals, x ~0-1 - {n_x} vals, tol={tol}. Fine coverage. \
-        Using previous solutions for initial guess. Max nodes={max_nodes}. Now targets are psi and dpsi/dx, used for auxiliary data loss function in training."
+        Using previous solutions for initial guess. Max nodes={max_nodes}. Now targets are psi and dpsi/dx, used for auxiliary data loss function in training. Method={method}."
         + (f" Part {part}/{n_parts} of T range." if part is not None else ""),
         group="week02mar",
         project="data_generation",
@@ -200,7 +215,7 @@ def generate_phase4_solver(
 
         try:
             # Pass y_guess to solve_beta_bvp (need to add y_guess param to that function)
-            x, psi, dpsi_dx, w_used, beta_used, dbeta_used = generate_solution(alpha, T, n_points=n_x, tol=tol, y_guess=y_guess, w_grid=w_grid, max_nodes=max_nodes)
+            x, psi, dpsi_dx, w_used, beta_used, dbeta_used = generate_solution(alpha, T, n_points=n_x, tol=tol, y_guess=y_guess, w_grid=w_grid, max_nodes=max_nodes, method=method)
             for xi, psii, dpsii in zip(x, psi, dpsi_dx):
                 data.append([xi, alpha, T, psii, dpsii])
             completed += 1
@@ -247,5 +262,9 @@ if __name__ == "__main__":
         "--n-parts", type=int, default=4,
         help="Total number of parts the T range is divided into (default: 4)"
     )
+    parser.add_argument(
+        "--method", type=str, default="scipy", choices=["scipy", "relax"],
+        help="Solver method: 'scipy' (default) or 'relax' (JAX relaxation)"
+    )
     args = parser.parse_args()
-    generate_phase4_solver(part=args.part, n_parts=args.n_parts)
+    generate_phase4_solver(part=args.part, n_parts=args.n_parts, method=args.method)
