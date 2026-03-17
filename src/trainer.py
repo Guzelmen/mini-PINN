@@ -133,6 +133,52 @@ def get_warmup_cosine_scheduler(optimizer, warmup_epochs, start_lr,
     return LambdaLR(optimizer, lr_lambda)
 
 
+def get_warmup_linear_decay_scheduler(optimizer, warmup_epochs, start_lr,
+                                      end_lr, min_lr, total_epochs,
+                                      linear_decay_epochs=None):
+    """
+    Create a learning rate scheduler with linear warmup followed by linear decay.
+
+    Args:
+        optimizer: PyTorch optimizer
+        warmup_epochs: Number of epochs to warm up
+        start_lr: Starting learning rate for warmup
+        end_lr: Peak learning rate (after warmup, start of linear decay)
+        min_lr: Minimum learning rate that linear decay reaches
+        total_epochs: Total number of training epochs
+        linear_decay_epochs: Fixed number of epochs for linear decay phase.
+            If None (default), decay spans (total_epochs - warmup_epochs).
+            If set, decays linearly over exactly this many epochs, then holds
+            at min_lr for the remainder.
+
+    Returns:
+        LambdaLR scheduler
+    """
+    if linear_decay_epochs is not None:
+        _linear_period = max(1, linear_decay_epochs)
+    else:
+        _linear_period = max(1, total_epochs - warmup_epochs)
+
+    def lr_lambda(epoch):
+        if warmup_epochs <= 0:
+            # Pure linear decay from epoch 0
+            progress = min(max(epoch, 0), _linear_period) / _linear_period
+            return (min_lr / end_lr) + (1.0 - min_lr / end_lr) * (1.0 - progress)
+
+        if epoch < warmup_epochs:
+            # Linear warmup: from start_lr/end_lr to 1.0
+            warmup_ratio = epoch / float(warmup_epochs)
+            return (start_lr / end_lr) * (1 - warmup_ratio) + 1.0 * warmup_ratio
+        else:
+            # Linear decay: from end_lr down to min_lr
+            linear_epoch = epoch - warmup_epochs
+            progress = min(max(linear_epoch, 0), _linear_period) / float(_linear_period)
+            # After linear_period, progress is clamped to 1.0 → holds at min_lr
+            return (min_lr / end_lr) + (1.0 - min_lr / end_lr) * (1.0 - progress)
+
+    return LambdaLR(optimizer, lr_lambda)
+
+
 def get_warmup_cosine_restarts_scheduler(optimizer, warmup_epochs, start_lr,
                                          end_lr, min_lr, restart_period):
     """
@@ -239,6 +285,7 @@ def trainer(
     end_lr = params.end_lr
     min_lr = params.min_lr
     cosine_decay_epochs = params.get('cosine_decay_epochs', None)
+    linear_decay_epochs = params.get('linear_decay_epochs', None)
     restart_period = params.get('cosine_restart_period', None)
     restart_decay_factor = getattr(params, 'restart_decay_factor', 0.6)
 
@@ -305,6 +352,30 @@ def trainer(
             scheduler = get_warmup_cosine_scheduler(
                 optimizer, warmup_epochs, start_lr, end_lr, min_lr, schedule_epochs,
                 cosine_decay_epochs=effective_cosine_decay)
+        print(schedule_msg)
+
+    elif lr_type == "linear_decay":
+        # Linear warmup + linear decay to min_lr (+ optional hold at min_lr)
+        optimizer = Adam(model.parameters(), lr=end_lr)
+        effective_linear_decay = None if add_extra_minlr_epochs else linear_decay_epochs
+        decay_len = effective_linear_decay if effective_linear_decay is not None else (schedule_epochs - warmup_epochs)
+        schedule_msg = (
+            f"LR schedule: {warmup_epochs} epochs warmup ({start_lr:.2e} -> {end_lr:.2e}), "
+            f"then linear decay to {min_lr:.2e} over {decay_len} epochs")
+        if effective_linear_decay is not None:
+            hold_epochs = max(0, schedule_epochs - warmup_epochs - effective_linear_decay)
+            schedule_msg += f", then hold at {min_lr:.2e} for {hold_epochs} epochs"
+        if add_extra_minlr_epochs and extra_epoch_amount > 0:
+            _tmp = get_warmup_linear_decay_scheduler(
+                optimizer, warmup_epochs, start_lr, end_lr, min_lr, schedule_epochs,
+                linear_decay_epochs=effective_linear_decay)
+            wrapped = wrap_with_minlr_tail(_tmp.lr_lambdas[0], schedule_epochs, min_lr, end_lr)
+            scheduler = LambdaLR(optimizer, wrapped)
+            schedule_msg += f", then min_lr tail for {extra_epoch_amount} epochs"
+        else:
+            scheduler = get_warmup_linear_decay_scheduler(
+                optimizer, warmup_epochs, start_lr, end_lr, min_lr, schedule_epochs,
+                linear_decay_epochs=effective_linear_decay)
         print(schedule_msg)
 
     elif lr_type == "cosine_restarts":
@@ -1148,14 +1219,15 @@ def trainer(
             print(f"  val loss = {avg_val_total:.6e}")
 
             if getattr(params, 'use_wandb', True):
+                _vn = getattr(params, "val_norm", "rel_l2")
                 wandb.log({
-                    "val/pde_loss": avg_val_residual,
+                    f"val/pde_loss_{_vn}": avg_val_residual,
                     **({"val/bc_1_loss": avg_val_bc1, "val/bc_2_loss": avg_val_bc2} if is_soft_mode else {}),
                     **({"val/fmt_loss": avg_val_fmt} if 'fmt' in val_losses else {}),
-                    **({"val/data_loss": avg_val_data, "val/physics_loss": avg_val_physics} if getattr(params, 'hybrid_training', False) else {}),
-                    **({"val/deriv_loss": avg_val_deriv} if getattr(params, 'use_deriv_loss', False) else {}),
-                    **({"val/boundary_loss": avg_val_boundary} if getattr(params, 'use_boundary_loss', False) else {}),
-                    "val/total_loss": avg_val_total,
+                    **({f"val/data_loss_{_vn}": avg_val_data, f"val/physics_loss_{_vn}": avg_val_physics} if getattr(params, 'hybrid_training', False) else {}),
+                    **({f"val/deriv_loss_{_vn}": avg_val_deriv} if getattr(params, 'use_deriv_loss', False) else {}),
+                    **({f"val/boundary_loss_{_vn}": avg_val_boundary} if getattr(params, 'use_boundary_loss', False) else {}),
+                    f"val/total_loss_{_vn}": avg_val_total,
                     "info/epoch_validation_time": time_taken_val
                 })
             # Record validation time (separate from epoch_total)
@@ -1260,11 +1332,12 @@ def trainer(
 
             print(f"  [ood_single] loss = {avg_ood_single_total:.6e}")
             if getattr(params, 'use_wandb', True):
+                _vn = getattr(params, "val_norm", "rel_l2")
                 wandb.log({
-                    "val_ood_single/pde_loss": avg_ood_single_residual,
-                    **({"val_ood_single/data_loss": avg_ood_single_data} if getattr(params, 'hybrid_training', False) else {}),
-                    **({"val_ood_single/deriv_loss": avg_ood_single_deriv} if getattr(params, 'use_deriv_loss', False) else {}),
-                    "val_ood_single/total_loss": avg_ood_single_total,
+                    f"val_ood_single/pde_loss_{_vn}": avg_ood_single_residual,
+                    **({f"val_ood_single/data_loss_{_vn}": avg_ood_single_data} if getattr(params, 'hybrid_training', False) else {}),
+                    **({f"val_ood_single/deriv_loss_{_vn}": avg_ood_single_deriv} if getattr(params, 'use_deriv_loss', False) else {}),
+                    f"val_ood_single/total_loss_{_vn}": avg_ood_single_total,
                 })
             time_analysis_dict[ep]["ood_single_val_sum"] = time_taken_ood_single
         else:
@@ -1367,11 +1440,12 @@ def trainer(
 
             print(f"  [ood_corner] loss = {avg_ood_corner_total:.6e}")
             if getattr(params, 'use_wandb', True):
+                _vn = getattr(params, "val_norm", "rel_l2")
                 wandb.log({
-                    "val_ood_corner/pde_loss": avg_ood_corner_residual,
-                    **({"val_ood_corner/data_loss": avg_ood_corner_data} if getattr(params, 'hybrid_training', False) else {}),
-                    **({"val_ood_corner/deriv_loss": avg_ood_corner_deriv} if getattr(params, 'use_deriv_loss', False) else {}),
-                    "val_ood_corner/total_loss": avg_ood_corner_total,
+                    f"val_ood_corner/pde_loss_{_vn}": avg_ood_corner_residual,
+                    **({f"val_ood_corner/data_loss_{_vn}": avg_ood_corner_data} if getattr(params, 'hybrid_training', False) else {}),
+                    **({f"val_ood_corner/deriv_loss_{_vn}": avg_ood_corner_deriv} if getattr(params, 'use_deriv_loss', False) else {}),
+                    f"val_ood_corner/total_loss_{_vn}": avg_ood_corner_total,
                 })
             time_analysis_dict[ep]["ood_corner_val_sum"] = time_taken_ood_corner
         else:

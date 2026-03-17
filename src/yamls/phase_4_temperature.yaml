@@ -8,15 +8,15 @@ base_config: &BASE_CONFIG
     ## parameters
   random_seed: 42
 
-  run_name: "MEGADATA_LOGX_gradually_add_losses_clip1_cosine_restart"
+  run_name: "curric_stage1_a0p5-5_T1-10_LAMX_CONTINUOUS_LOSSES_BOUND_ADDED_clip1_LINEAR_DECAY"
   wandb_notes: "mega data change, even more mega data range. \
     Using best model from 1e-6 clamp, with log x as detached 4th input"
 ## wandb parameters
   use_wandb: True  # Set False to disable all wandb logging
-  wandb_group: "week09mar"
+  wandb_group: "week16mar"
   wandb_project: "mini_pinn"
   wandb_entity: "guzelmen_msci_project"
-  wandb_tags: ["norm_loss_weights_to_1", "16384pts_perbatch"]
+  wandb_tags: ["norm_loss_weights_to_1", "512pts_perbatch", "curriculum_stage1"]
 
   phase: 4 # temperature-dependent TF
   n_vars: 3  # network inputs
@@ -49,21 +49,21 @@ base_config: &BASE_CONFIG
   T_std: 1.0
 
   ## normalisation (x)
-  use_log_x: True           # If True, use log(x) as detached 4th input (original)
-  use_log_lam_x: False       # If True, use log(λx) as detached 4th input (new)
+  use_log_x: False           # If True, use log(x) as detached 4th input (original)
+  use_log_lam_x: True       # If True, use log(λx) as detached 4th input (new)
   x_log_mean: 0.0            # Will be computed from train data (used by whichever is active)
   x_log_std: 1.0             # Will be computed from train data
 
   ## optimizer parameters
-  lr_type: "cosine_decaying_restarts" # constant, linear, cosine, cosine_restarts, cosine_decaying_restarts
+  lr_type: "linear_decay" # constant, linear, cosine, linear_decay, cosine_restarts, cosine_decaying_restarts
   constant_lr: 1e-4
   start_lr: 1e-5
   end_lr: 1e-3
   lr_warmup_epochs: 50
   min_lr: 5e-5  # Minimum LR at the bottom of every cosine cycle
-  cosine_restart_period: 500  # Epochs per cycle for cosine_restarts / cosine_decaying_restarts
+  cosine_restart_period: 400  # Epochs per cycle for cosine_restarts / cosine_decaying_restarts
   restart_decay_factor: 0.7   # Geometric decay of peak LR per cycle (cosine_decaying_restarts only)
-  cosine_decay_epochs: 800  # Fixed cosine decay period (omit to use total_epochs - warmup)
+  # cosine_decay_epochs: 800  # Fixed cosine decay period (omit to use total_epochs - warmup)
   grad_clipping: True  # Clips to clip_value
   clip_value: 1.0
 
@@ -71,7 +71,7 @@ base_config: &BASE_CONFIG
   # epochs, then hold at min_lr for the remaining extra_epoch_amount epochs.
   # Overrides cosine_decay_epochs when lr_type is cosine.
   add_extra_minlr_epochs: True
-  extra_epoch_amount: 500
+  extra_epoch_amount: 100
 
   ## loss parameters
   loss_type: "mse"
@@ -90,34 +90,34 @@ base_config: &BASE_CONFIG
   hybrid_training: True  # If True, combine PDE loss with data loss
   use_solver_data: True  # If True, load data in {inputs, targets} format
   data_loss_type: "rel_l2"  # options: "mse", "rel_l2"
-  val_norm: "rel_l2"  # "rel_l2" or "rel_l1" — controls ALL validation losses
+  val_norm: "rel_l1"  # "rel_l2" or "rel_l1" — controls ALL validation losses
   hybrid_weight_strategy: "fixed"  # "fixed" or "adaptive" (adaptive overrides schedule below)
   hybrid_weight_schedule: "cosine"  # "fixed", "step", or "cosine"
   # Starting weights (epoch 0)
   physics_loss_weight: 0.0
   data_loss_weight: 5.0
-  deriv_loss_weight: 0.0
+  deriv_loss_weight: 1.0
   # Final weights (last epoch) — cosine interpolation between start and end
   physics_loss_weight_final: 3.0
-  data_loss_weight_final: 2.0
+  data_loss_weight_final: 3.0
   deriv_loss_weight_final: 2.0
   data_loss_step_epochs: 500  # Only used when hybrid_weight_schedule: "step"
   # Delayed cosine schedule for physics weight only:
   # Hold physics weight fixed for `physics_weight_delay_epochs`, then cosine from start to final over remaining epochs.
   # Data weight still uses the normal full-range cosine schedule.
-  physics_weight_delayed_cosine: True  # Set True to enable
-  physics_weight_delay_epochs: 1000      # Number of epochs to hold physics_loss_weight fixed before cosine begins
+  physics_weight_delayed_cosine: False  # Set True to enable
+  physics_weight_delay_epochs: 800      # Number of epochs to hold physics_loss_weight fixed before cosine begins
   # Delayed cosine schedule for deriv weight only:
   # Hold deriv weight fixed for `deriv_weight_delay_epochs`, then cosine from start to final over remaining epochs.
   # Set False to revert to normal full-range cosine schedule.
-  deriv_weight_delayed_cosine: True  # Set True to enable
-  deriv_weight_delay_epochs: 500       # Number of epochs to hold deriv_loss_weight fixed before cosine begins
+  deriv_weight_delayed_cosine: False  # Set True to enable
+  deriv_weight_delay_epochs: 400       # Number of epochs to hold deriv_loss_weight fixed before cosine begins
   # Auxiliary boundary loss (x=1 points vs solver targets, rel_l2)
   # Weight is held at initial value for boundary_weight_delay_epochs, then cosine-interpolates to final.
-  use_boundary_loss: False          # Set True to enable
+  use_boundary_loss: True          # Set True to enable
   boundary_loss_weight: 0.0         # Initial weight (held for delay epochs)
   boundary_loss_weight_final: 4.0   # Final weight after cosine ramp
-  boundary_weight_delay_epochs: 750 # Epochs before cosine begins
+  boundary_weight_delay_epochs: 500 # Epochs before cosine begins
 
   ## derivative target loss
   use_deriv_loss: True        # If True, add dψ/dx matching loss from solver data
@@ -133,15 +133,15 @@ base_config: &BASE_CONFIG
   # Absolute training range for curriculum learning (null = use full coarse data range).
   # For staged training: set explicit values here, save weights, then widen the range
   # in the next run using pretrained_weights_path. Always use cumulative ranges
-  # (keep the easy lower bound) to avoid catastrophic forgetting.
-  alpha_min_train: null
-  alpha_max_train: null
-  T_min_train: null
-  T_max_train: null
+  # (keep the easy lower bound) to avoid forgetting.
+  alpha_min_train: 0.5
+  alpha_max_train: 5
+  T_min_train: 1
+  T_max_train: 10
   interp_val_n_samples: 50000
   ood_eval_interval: 50
 
-  batch_size: 16384
+  batch_size: 512
   shuffle_train: True
   use_sqrtx: False
 
@@ -152,7 +152,7 @@ base_config: &BASE_CONFIG
 
   ## training parameters
   stage: "train"
-  epochs: 2050
+  epochs: 1450
 
   # saving
   save_preds: False
