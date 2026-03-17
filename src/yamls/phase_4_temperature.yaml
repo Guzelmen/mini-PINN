@@ -16,7 +16,7 @@ base_config: &BASE_CONFIG
   wandb_group: "week09mar"
   wandb_project: "mini_pinn"
   wandb_entity: "guzelmen_msci_project"
-  wandb_tags: ["norm_loss_weights_to_1", "8192pts_perbatch"]
+  wandb_tags: ["norm_loss_weights_to_1", "16384pts_perbatch"]
 
   phase: 4 # temperature-dependent TF
   n_vars: 3  # network inputs
@@ -130,16 +130,25 @@ base_config: &BASE_CONFIG
   ## extended loader (new two-file parameter-space split)
   use_extended_loader: True
   fine_data_path: "data/phase_4_solver_mega_fine.pt"
-  alpha_lo_pct: 1
-  alpha_hi_pct: 1
-  T_lo_pct: 1
-  T_hi_pct: 1
+  # Absolute training range for curriculum learning (null = use full coarse data range).
+  # For staged training: set explicit values here, save weights, then widen the range
+  # in the next run using pretrained_weights_path. Always use cumulative ranges
+  # (keep the easy lower bound) to avoid catastrophic forgetting.
+  alpha_min_train: null
+  alpha_max_train: null
+  T_min_train: null
+  T_max_train: null
   interp_val_n_samples: 50000
   ood_eval_interval: 50
 
-  batch_size: 8192
+  batch_size: 16384
   shuffle_train: True
   use_sqrtx: False
+
+  ## pretrained weights (optional warm-start)
+  # Relative paths are resolved from PROJECT_ROOT.
+  # Example: pretrained_weights_path: "saving_weights/some_run/weights_epoch_1000"
+  pretrained_weights_path: null
 
   ## training parameters
   stage: "train"

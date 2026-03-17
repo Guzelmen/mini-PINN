@@ -1,4 +1,3 @@
-import math
 import torch
 from ..utils import PROJECT_ROOT
 
@@ -59,24 +58,21 @@ def load_extended_data(params):
               f"{n_before_f} -> {fine_inputs.shape[0]} ({n_before_f - fine_inputs.shape[0]} removed)")
 
     # ------------------------------------------------------------------
-    # Compute boundary edges from coarse unique (alpha, T) values
+    # Compute boundary edges from absolute min/max config params
+    # (null → use actual coarse data min/max)
     # ------------------------------------------------------------------
-    alpha_vals = torch.unique(coarse_inputs[:, 1])
-    T_vals     = torch.unique(coarse_inputs[:, 2])
+    alpha_lo = getattr(params, 'alpha_min_train', None)
+    alpha_hi = getattr(params, 'alpha_max_train', None)
+    T_lo     = getattr(params, 'T_min_train',     None)
+    T_hi     = getattr(params, 'T_max_train',     None)
 
-    def _log_edge(unique_vals, lo_pct, hi_pct):
-        log_vals = torch.log(unique_vals)
-        lo = float(torch.quantile(log_vals, lo_pct / 100.0))
-        hi = float(torch.quantile(log_vals, 1.0 - hi_pct / 100.0))
-        return math.exp(lo), math.exp(hi)
+    coarse_alpha = coarse_inputs[:, 1]
+    coarse_T     = coarse_inputs[:, 2]
 
-    alpha_lo_pct = getattr(params, 'alpha_lo_pct', 10)
-    alpha_hi_pct = getattr(params, 'alpha_hi_pct', 5)
-    T_lo_pct     = getattr(params, 'T_lo_pct', 5)
-    T_hi_pct     = getattr(params, 'T_hi_pct', 5)
-
-    alpha_lo, alpha_hi = _log_edge(alpha_vals, alpha_lo_pct, alpha_hi_pct)
-    T_lo,     T_hi     = _log_edge(T_vals,     T_lo_pct,     T_hi_pct)
+    if alpha_lo is None: alpha_lo = float(coarse_alpha.min())
+    if alpha_hi is None: alpha_hi = float(coarse_alpha.max())
+    if T_lo     is None: T_lo     = float(coarse_T.min())
+    if T_hi     is None: T_hi     = float(coarse_T.max())
 
     # ------------------------------------------------------------------
     # Build splits
@@ -113,19 +109,21 @@ def load_extended_data(params):
     ood_corner_targets = fine_targets[corner_mask]
 
     # ------------------------------------------------------------------
-    # Normalisation stats from training set only
+    # Normalisation stats from FULL fine dataset
+    # (constant regardless of curriculum cutoffs applied above)
+    # Note: log(T) not log1p(T) — T spans 4 orders of magnitude (0.0001-10)
     # ------------------------------------------------------------------
-    train_log_alpha = torch.log1p(train_inputs[:, 1])
-    train_log_T     = torch.log1p(train_inputs[:, 2])
-    train_log_x     = torch.log(train_inputs[:, 0] + 1e-8)
+    fine_log_alpha = torch.log1p(fine_inputs[:, 1])
+    fine_log_T     = torch.log(fine_inputs[:, 2] + 1e-12)
+    fine_log_x     = torch.log(fine_inputs[:, 0] + 1e-8)
 
     norm_stats = {
-        'a_mean':     float(train_log_alpha.mean()),
-        'a_std':      float(train_log_alpha.std(unbiased=False)),
-        'T_mean':     float(train_log_T.mean()),
-        'T_std':      float(train_log_T.std(unbiased=False)),
-        'x_log_mean': float(train_log_x.mean()),
-        'x_log_std':  float(train_log_x.std(unbiased=False)),
+        'a_mean':     float(fine_log_alpha.mean()),
+        'a_std':      float(fine_log_alpha.std(unbiased=False)),
+        'T_mean':     float(fine_log_T.mean()),
+        'T_std':      float(fine_log_T.std(unbiased=False)),
+        'x_log_mean': float(fine_log_x.mean()),
+        'x_log_std':  float(fine_log_x.std(unbiased=False)),
     }
 
     # ------------------------------------------------------------------
@@ -138,7 +136,7 @@ def load_extended_data(params):
           f"(subsampled from {n_before})")
     print(f"[extended_loader] ood_single:  {ood_single_inputs.shape[0]} points")
     print(f"[extended_loader] ood_corner:  {ood_corner_inputs.shape[0]} points")
-    print(f"[extended_loader] Norm stats: "
+    print(f"[extended_loader] Norm stats (from full fine dataset, log T): "
           f"a_mean={norm_stats['a_mean']:.4f}, a_std={norm_stats['a_std']:.4f}, "
           f"T_mean={norm_stats['T_mean']:.4f}, T_std={norm_stats['T_std']:.4f}")
 

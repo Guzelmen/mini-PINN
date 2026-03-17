@@ -76,6 +76,22 @@ def load_model_from_config_and_state(
     elif "a_min" in sd_keys and "a_max" in sd_keys:
         params.norm_mode = "minmax"
 
+    # Phase 4: temperature normalization buffers
+    if "T_mean" in sd_keys and "T_std" in sd_keys:
+        try:
+            params.T_mean = float(state_dict["T_mean"].item())
+            params.T_std  = float(state_dict["T_std"].item())
+        except Exception:
+            pass
+
+    # Phase 4: log-x normalization buffers
+    if "x_log_mean" in sd_keys and "x_log_std" in sd_keys:
+        try:
+            params.x_log_mean = float(state_dict["x_log_mean"].item())
+            params.x_log_std  = float(state_dict["x_log_std"].item())
+        except Exception:
+            pass
+
     model = build_model_from_params(params)
 
     # Load state dict saved with torch.save(model.state_dict(), path)

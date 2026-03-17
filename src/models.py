@@ -579,8 +579,8 @@ class Model_hard_phase4(nn.Module):
         return normalised
 
     def scale_T(self, T_kV):
-        """Normalize temperature using log1p + standardize/minmax."""
-        t = torch.log1p(T_kV)
+        """Normalize temperature using log + standardize/minmax."""
+        t = torch.log(T_kV + 1e-12)
 
         if self.norm_mode == "standardize":
             normalised = (t - self.T_mean) / (self.T_std + 1e-8)

@@ -3,6 +3,7 @@ Will run training and inference from here.
 """
 import random
 import os
+from pathlib import Path
 from . import models
 from .eval_inference.color_map import (
     find_latest_state_path,
@@ -148,13 +149,13 @@ def run_training(params):
 
                 # Phase 4: Also compute T normalization stats
                 if int(params.phase) == 4:
-                    train_log_T = torch.log1p(X_train[:, 2:3])
+                    train_log_T = torch.log(X_train[:, 2:3] + 1e-12)
                     T_mean = float(train_log_T.mean().item())
                     T_std = float(train_log_T.std(unbiased=False).item())
                     params.T_mean = T_mean
                     params.T_std = T_std
                     print(
-                        f"[norm] Train standardize log1p(T): mean={T_mean:.6g}, std={T_std:.6g}"
+                        f"[norm] Train standardize log(T): mean={T_mean:.6g}, std={T_std:.6g}"
                     )
 
                     # Phase 4: Optionally compute log x normalization stats
@@ -205,19 +206,19 @@ def run_training(params):
 
                     # Phase 4: Val T diagnostics
                     if int(params.phase) == 4:
-                        val_log_T = torch.log1p(X_val[:, 2:3])
+                        val_log_T = torch.log(X_val[:, 2:3] + 1e-12)
                         val_T_stdzd = (val_log_T - T_mean) / (T_std + 1e-12)
                         diag.update({
-                            "norm/val_log1p_T_mean": float(val_log_T.mean().item()),
-                            "norm/val_log1p_T_std": float(val_log_T.std(unbiased=False).item()),
-                            "norm/val_log1p_T_stdzd_mean": float(val_T_stdzd.mean().item()),
-                            "norm/val_log1p_T_stdzd_std": float(val_T_stdzd.std(unbiased=False).item()),
+                            "norm/val_log_T_mean": float(val_log_T.mean().item()),
+                            "norm/val_log_T_std": float(val_log_T.std(unbiased=False).item()),
+                            "norm/val_log_T_stdzd_mean": float(val_T_stdzd.mean().item()),
+                            "norm/val_log_T_stdzd_std": float(val_T_stdzd.std(unbiased=False).item()),
                         })
                         print(
-                            f"[norm] Val log1p(T): mean={diag['norm/val_log1p_T_mean']:.6g}, "
-                            f"std={diag['norm/val_log1p_T_std']:.6g} | "
-                            f"stdzd(mean,std)=({diag['norm/val_log1p_T_stdzd_mean']:.6g}, "
-                            f"{diag['norm/val_log1p_T_stdzd_std']:.6g})"
+                            f"[norm] Val log(T): mean={diag['norm/val_log_T_mean']:.6g}, "
+                            f"std={diag['norm/val_log_T_std']:.6g} | "
+                            f"stdzd(mean,std)=({diag['norm/val_log_T_stdzd_mean']:.6g}, "
+                            f"{diag['norm/val_log_T_stdzd_std']:.6g})"
                         )
 
                         # Phase 4: Val log x diagnostics
@@ -260,19 +261,19 @@ def run_training(params):
 
                     # Phase 4: Test T diagnostics
                     if int(params.phase) == 4:
-                        test_log_T = torch.log1p(X_test[:, 2:3])
+                        test_log_T = torch.log(X_test[:, 2:3] + 1e-12)
                         test_T_stdzd = (test_log_T - T_mean) / (T_std + 1e-12)
                         diag.update({
-                            "norm/test_log1p_T_mean": float(test_log_T.mean().item()),
-                            "norm/test_log1p_T_std": float(test_log_T.std(unbiased=False).item()),
-                            "norm/test_log1p_T_stdzd_mean": float(test_T_stdzd.mean().item()),
-                            "norm/test_log1p_T_stdzd_std": float(test_T_stdzd.std(unbiased=False).item()),
+                            "norm/test_log_T_mean": float(test_log_T.mean().item()),
+                            "norm/test_log_T_std": float(test_log_T.std(unbiased=False).item()),
+                            "norm/test_log_T_stdzd_mean": float(test_T_stdzd.mean().item()),
+                            "norm/test_log_T_stdzd_std": float(test_T_stdzd.std(unbiased=False).item()),
                         })
                         print(
-                            f"[norm] Test log1p(T): mean={diag['norm/test_log1p_T_mean']:.6g}, "
-                            f"std={diag['norm/test_log1p_T_std']:.6g} | "
-                            f"stdzd(mean,std)=({diag['norm/test_log1p_T_stdzd_mean']:.6g}, "
-                            f"{diag['norm/test_log1p_T_stdzd_std']:.6g})"
+                            f"[norm] Test log(T): mean={diag['norm/test_log_T_mean']:.6g}, "
+                            f"std={diag['norm/test_log_T_std']:.6g} | "
+                            f"stdzd(mean,std)=({diag['norm/test_log_T_stdzd_mean']:.6g}, "
+                            f"{diag['norm/test_log_T_stdzd_std']:.6g})"
                         )
 
                         # Phase 4: Test log x diagnostics
@@ -402,6 +403,21 @@ def run_training(params):
     ModelClass = getattr(models, model_class_name)
     model = ModelClass(params)
     model.to(params.device)
+
+    # Optional: load pretrained weights before training begins
+    pretrained_path = getattr(params, 'pretrained_weights_path', None)
+    if pretrained_path and str(pretrained_path).lower() not in ('null', 'none', ''):
+        p = Path(pretrained_path)
+        if not p.is_absolute():
+            p = PROJECT_ROOT / p
+        print(f"[pretrain] Loading pretrained weights from {p}")
+        pt_state = torch.load(p, map_location=torch.device(params.device))
+        missing, unexpected = model.load_state_dict(pt_state, strict=False)
+        if missing:
+            print(f"[pretrain] Missing keys (will remain as initialized): {missing}")
+        if unexpected:
+            print(f"[pretrain] Unexpected keys (ignored): {unexpected}")
+        print("[pretrain] Weights loaded successfully.")
 
     if params.stage == "train":
         # train the model

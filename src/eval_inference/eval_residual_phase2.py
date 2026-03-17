@@ -93,6 +93,16 @@ def build_model(params, state_dict, device):
             except Exception:
                 pass
 
+        # Phase 4: log-x normalization buffers
+        if "x_log_mean" in sd_keys and "x_log_std" in sd_keys:
+            try:
+                val = state_dict["x_log_mean"]
+                params.x_log_mean = float(val.item() if hasattr(val, "item") else val)
+                val = state_dict["x_log_std"]
+                params.x_log_std = float(val.item() if hasattr(val, "item") else val)
+            except Exception:
+                pass
+
     # Instantiate model class
     mode = str(params.mode).strip()
     phase = int(params.phase)
