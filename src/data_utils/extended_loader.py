@@ -115,16 +115,27 @@ def load_extended_data(params):
     # ------------------------------------------------------------------
     fine_log_alpha = torch.log1p(fine_inputs[:, 1])
     fine_log_T     = torch.log(fine_inputs[:, 2] + 1e-12)
-    fine_log_x     = torch.log(fine_inputs[:, 0] + 1e-8)
+
+    use_log_lam_x = getattr(params, 'use_log_lam_x', False)
+    if use_log_lam_x:
+        from ..fd_integrals import B_M, C0_M
+        fine_lam   = fine_inputs[:, 1:2] * B_M * (fine_inputs[:, 2:3] ** 0.25) / C0_M
+        fine_log_x = torch.log(fine_lam * fine_inputs[:, 0:1] + 1e-12).squeeze(1)
+    else:
+        fine_log_x = torch.log(fine_inputs[:, 0] + 1e-8)
 
     norm_stats = {
-        'a_mean':     float(fine_log_alpha.mean()),
-        'a_std':      float(fine_log_alpha.std(unbiased=False)),
-        'T_mean':     float(fine_log_T.mean()),
-        'T_std':      float(fine_log_T.std(unbiased=False)),
-        'x_log_mean': float(fine_log_x.mean()),
-        'x_log_std':  float(fine_log_x.std(unbiased=False)),
+        'a_mean':  float(fine_log_alpha.mean()),
+        'a_std':   float(fine_log_alpha.std(unbiased=False)),
+        'T_mean':  float(fine_log_T.mean()),
+        'T_std':   float(fine_log_T.std(unbiased=False)),
     }
+    if use_log_lam_x:
+        norm_stats['x_log_lam_mean'] = float(fine_log_x.mean())
+        norm_stats['x_log_lam_std']  = float(fine_log_x.std(unbiased=False))
+    else:
+        norm_stats['x_log_mean'] = float(fine_log_x.mean())
+        norm_stats['x_log_std']  = float(fine_log_x.std(unbiased=False))
 
     # ------------------------------------------------------------------
     # Summary
@@ -136,9 +147,16 @@ def load_extended_data(params):
           f"(subsampled from {n_before})")
     print(f"[extended_loader] ood_single:  {ood_single_inputs.shape[0]} points")
     print(f"[extended_loader] ood_corner:  {ood_corner_inputs.shape[0]} points")
-    print(f"[extended_loader] Norm stats (from full fine dataset, log T): "
-          f"a_mean={norm_stats['a_mean']:.4f}, a_std={norm_stats['a_std']:.4f}, "
-          f"T_mean={norm_stats['T_mean']:.4f}, T_std={norm_stats['T_std']:.4f}")
+    if use_log_lam_x:
+        print(f"[extended_loader] Norm stats (from full fine dataset, log T): "
+              f"a_mean={norm_stats['a_mean']:.4f}, a_std={norm_stats['a_std']:.4f}, "
+              f"T_mean={norm_stats['T_mean']:.4f}, T_std={norm_stats['T_std']:.4f}, "
+              f"x_log_lam_mean={norm_stats['x_log_lam_mean']:.4f}, x_log_lam_std={norm_stats['x_log_lam_std']:.4f}")
+    else:
+        print(f"[extended_loader] Norm stats (from full fine dataset, log T): "
+              f"a_mean={norm_stats['a_mean']:.4f}, a_std={norm_stats['a_std']:.4f}, "
+              f"T_mean={norm_stats['T_mean']:.4f}, T_std={norm_stats['T_std']:.4f}, "
+              f"x_log_mean={norm_stats['x_log_mean']:.4f}, x_log_std={norm_stats['x_log_std']:.4f}")
 
     return {
         'train':               train_inputs,

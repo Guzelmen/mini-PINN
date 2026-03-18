@@ -76,8 +76,8 @@ def run_training(params):
             params.x_log_mean = ns['x_log_mean']
             params.x_log_std  = ns['x_log_std']
         elif getattr(params, 'use_log_lam_x', False):
-            params.x_log_mean = ns['x_log_mean']
-            params.x_log_std  = ns['x_log_std']
+            params.x_log_mean = ns['x_log_lam_mean']
+            params.x_log_std  = ns['x_log_lam_std']
 
         # Print and log to wandb
         print(f"[norm] Extended loader stats: a=({ns['a_mean']:.4f}, {ns['a_std']:.4f}), "

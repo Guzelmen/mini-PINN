@@ -8,7 +8,7 @@ base_config: &BASE_CONFIG
     ## parameters
   random_seed: 42
 
-  run_name: "curric_stage1_a0p5-5_T1-10_LAMX_CONTINUOUS_LOSSES_BOUND_ADDED_clip1_LINEAR_DECAY"
+  run_name: "curric_stage1_a0p5-5_T1-10_LOGX_CONTINUOUS_LOSSES_BOUND_CONT_TOO_clip1_LINEAR_DECAY"
   wandb_notes: "mega data change, even more mega data range. \
     Using best model from 1e-6 clamp, with log x as detached 4th input"
 ## wandb parameters
@@ -16,7 +16,7 @@ base_config: &BASE_CONFIG
   wandb_group: "week16mar"
   wandb_project: "mini_pinn"
   wandb_entity: "guzelmen_msci_project"
-  wandb_tags: ["norm_loss_weights_to_1", "512pts_perbatch", "curriculum_stage1"]
+  wandb_tags: ["norm_loss_weights_to_1", "2048pts_perbatch", "curriculum_stage2", "warm_start"]
 
   phase: 4 # temperature-dependent TF
   n_vars: 3  # network inputs
@@ -26,7 +26,7 @@ base_config: &BASE_CONFIG
   mode: "hard" # "soft" or "hard"
   inp_dim: 3  
   nlayers: 8
-  hidden: 128
+  hidden: 256
   activation: "SiLU" # SiLU, Tanh, ReLU, Identity, SIREN, GELU, Mish
   w0: 30
   add_phi0: False
@@ -49,8 +49,8 @@ base_config: &BASE_CONFIG
   T_std: 1.0
 
   ## normalisation (x)
-  use_log_x: False           # If True, use log(x) as detached 4th input (original)
-  use_log_lam_x: True       # If True, use log(λx) as detached 4th input (new)
+  use_log_x: True           # If True, use log(x) as detached 4th input (original)
+  use_log_lam_x: False       # If True, use log(λx) as detached 4th input (new)
   x_log_mean: 0.0            # Will be computed from train data (used by whichever is active)
   x_log_std: 1.0             # Will be computed from train data
 
@@ -71,7 +71,7 @@ base_config: &BASE_CONFIG
   # epochs, then hold at min_lr for the remaining extra_epoch_amount epochs.
   # Overrides cosine_decay_epochs when lr_type is cosine.
   add_extra_minlr_epochs: True
-  extra_epoch_amount: 100
+  extra_epoch_amount: 300
 
   ## loss parameters
   loss_type: "mse"
@@ -117,7 +117,7 @@ base_config: &BASE_CONFIG
   use_boundary_loss: True          # Set True to enable
   boundary_loss_weight: 0.0         # Initial weight (held for delay epochs)
   boundary_loss_weight_final: 4.0   # Final weight after cosine ramp
-  boundary_weight_delay_epochs: 500 # Epochs before cosine begins
+  boundary_weight_delay_epochs: 0 # Epochs before cosine begins
 
   ## derivative target loss
   use_deriv_loss: True        # If True, add dψ/dx matching loss from solver data
@@ -135,24 +135,25 @@ base_config: &BASE_CONFIG
   # in the next run using pretrained_weights_path. Always use cumulative ranges
   # (keep the easy lower bound) to avoid forgetting.
   alpha_min_train: 0.5
-  alpha_max_train: 5
-  T_min_train: 1
+  alpha_max_train: 10
+  T_min_train: 0.1
   T_max_train: 10
   interp_val_n_samples: 50000
   ood_eval_interval: 50
 
-  batch_size: 512
+  batch_size: 2048
   shuffle_train: True
   use_sqrtx: False
 
   ## pretrained weights (optional warm-start)
   # Relative paths are resolved from PROJECT_ROOT.
   # Example: pretrained_weights_path: "saving_weights/some_run/weights_epoch_1000"
-  pretrained_weights_path: null
+  pretrained_weights_path: "saving_weights/curric_stage1_a0p5-5_T1-10_LOGX_CONTINUOUS_LOSSES_BOUND_ADDED_clip1_LINEAR_DECAY/weights_epoch_1400"
+  # "saving_weights/curric_stage1_a0p5-5_T1-10_LOGX_CONTINUOUS_LOSSES_BOUND_ADDED_clip1_LINEAR_DECAY/weights_epoch_1400"
 
   ## training parameters
   stage: "train"
-  epochs: 1450
+  epochs: 1750
 
   # saving
   save_preds: False
