@@ -9,13 +9,13 @@ from typing import Tuple, Union
 # src/utils.py -> src -> root
 PROJECT_ROOT = Path(__file__).parent.parent
 
-def first_deriv_auto(out, inp, var1 = 0):
+def first_deriv_auto(out, inp, var1 = 0, create_graph = True):
     df_dinp_out = torch.autograd.grad(
         outputs=out,
         inputs=inp,
         grad_outputs=torch.ones_like(out),
-        create_graph=True,
-        retain_graph=True,
+        create_graph=create_graph,
+        retain_graph=create_graph,
         only_inputs=True,
         allow_unused=False
     )

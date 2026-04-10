@@ -277,7 +277,7 @@ class Model_hard_phase2(nn.Module):
             h = self.act(layer(h))
         N = self.out(h)
 
-        N_prime = first_deriv_auto(N, norm_inp, var1=0)
+        N_prime = first_deriv_auto(N, norm_inp, var1=0, create_graph=self.training)
 
         #debugging
         if self.debug_mode is True:
@@ -426,7 +426,7 @@ class Model_hard_phase3(nn.Module):
             h = self.act(layer(h))
         N = self.out(h)
 
-        N_prime = first_deriv_auto(N, inputs, var1=0)
+        N_prime = first_deriv_auto(N, inputs, var1=0, create_graph=self.training)
 
         #debugging
         if self.debug_mode is True:
@@ -668,7 +668,7 @@ class Model_hard_phase4(nn.Module):
         N = self.out(h)
 
         # Compute N' w.r.t. x (need grad through original inputs for PDE loss)
-        N_prime = first_deriv_auto(N, inputs, var1=0)
+        N_prime = first_deriv_auto(N, inputs, var1=0, create_graph=self.training)
 
         if self.debug_mode:
             print(f"[Phase4 fwd] N: min={N.min().item():.6g}, max={N.max().item():.6g}")
