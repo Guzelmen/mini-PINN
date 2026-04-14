@@ -1,6 +1,7 @@
 """
 This file contains the model architecture for the small PINN.
 """
+import time
 import torch
 import torch.nn as nn
 import math
@@ -661,14 +662,17 @@ class Model_hard_phase4(nn.Module):
             print(f"[Phase4 fwd] norm_T: mean={norm_T.mean().item():.6g}, std={norm_T.std().item():.6g}")
 
         
-
+        t0 = time.perf_counter()
         h = self.act(self.first(network_inp))
         for layer in self.hiddens:
             h = self.act(layer(h))
         N = self.out(h)
-
+        t_pure_matmul = (time.perf_counter() - t0) * 1e3
+        print_matmul_time = False
+        if print_matmul_time == True
+            print(f"[diag] Pure matmul only (no autograd): {t_pure_matmul:.2f} ms")
         # Compute N' w.r.t. x (need grad through original inputs for PDE loss)
-        N_prime = first_deriv_auto(N, inputs, var1=0, create_graph=self.training)
+        N_prime = first_deriv_auto(N, inputs, var1=0)
 
         if self.debug_mode:
             print(f"[Phase4 fwd] N: min={N.min().item():.6g}, max={N.max().item():.6g}")

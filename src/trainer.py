@@ -734,6 +734,15 @@ def trainer(
             totloss_fn = getattr(losses, totlossname)
             total_loss = totloss_fn(loss_dict, weighter)
             t_loss_combine_end = time.time()
+            
+            debug_loss = False
+            if debug_loss == True:
+                print(f"[DEBUG] Loss is {total_loss.item()} at epoch {ep}")
+                print(f"  outputs min/max: {outputs.min().item():.4g} / {outputs.max().item():.4g}")
+                print(f"  inputs T range: {inputs[:,2].min().item():.6f} to {inputs[:,2].max().item():.6f}")
+                print(f"  inputs alpha range: {inputs[:,1].min().item():.4f} to {inputs[:,1].max().item():.4f}")
+                print(f"  inputs x range: {inputs[:,0].min().item():.6f} to {inputs[:,0].max().item():.6f}")
+                
 
             # Backpropagation
             t_ta_bp = time.time()
