@@ -999,6 +999,15 @@ def trainer(
                                                 + (weighter.boundary_weight_final - weighter.boundary_weight_initial)
                                                 * bnd_cosine)
 
+        # Step-log override for physics weight (independent of hybrid_weight_schedule)
+        if (weighter.hybrid_training
+                and getattr(weighter, 'physics_weight_schedule', 'cosine') == 'step_log'):
+            new_phys_weight = 0.0
+            for start_ep, w in weighter.physics_weight_steps:
+                if ep >= start_ep:
+                    new_phys_weight = w
+            weighter.physics_weight = new_phys_weight
+
         # Update scheduler AFTER all batches (PyTorch best practice)
         scheduler.step()
         # Update for next epoch's logging

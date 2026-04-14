@@ -889,6 +889,9 @@ class LossWeighter_phase4:
         self.data_weight_final = getattr(params, 'data_loss_weight_final', self.data_weight)
         self.deriv_weight_final = getattr(params, 'deriv_loss_weight_final', self.deriv_weight)
         self.hybrid_weight_schedule = getattr(params, 'hybrid_weight_schedule', 'fixed')
+        # Independent step schedule for physics weight only
+        self.physics_weight_schedule = getattr(params, 'physics_weight_schedule', 'cosine')
+        self.physics_weight_steps = getattr(params, 'physics_weight_steps', [])
         # Delayed cosine for physics weight only
         self.physics_weight_delayed_cosine = getattr(params, 'physics_weight_delayed_cosine', False)
         self.physics_weight_delay_epochs = getattr(params, 'physics_weight_delay_epochs', 0)
