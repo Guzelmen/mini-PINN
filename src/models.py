@@ -669,7 +669,7 @@ class Model_hard_phase4(nn.Module):
         N = self.out(h)
         t_pure_matmul = (time.perf_counter() - t0) * 1e3
         print_matmul_time = False
-        if print_matmul_time == True
+        if print_matmul_time == True:
             print(f"[diag] Pure matmul only (no autograd): {t_pure_matmul:.2f} ms")
         # Compute N' w.r.t. x (need grad through original inputs for PDE loss)
         N_prime = first_deriv_auto(N, inputs, var1=0)
